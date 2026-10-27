@@ -16,6 +16,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <shellapi.h>
+#include <objbase.h>
 #include <gdiplus.h>
 
 #include <string>
