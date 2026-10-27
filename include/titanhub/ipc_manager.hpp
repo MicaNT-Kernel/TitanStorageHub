@@ -105,7 +105,8 @@ public:
             {"TitanZFS",     "TitanZFS",     L"\\\\.\\pipe\\titanzfs_ipc",   0x5A465349504331ULL},
             {"TitanReFS",    "TitanReFS",    L"\\\\.\\pipe\\titanrefs_ipc",  0x5245465349504331ULL},
             {"TitanNTFS",    "TitanNTFS",    L"\\\\.\\pipe\\titanntfs_ipc",  0x4E54465349504331ULL},
-            {"TitanBtrfs",   "TitanBtrfs",   L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL}
+            {"TitanBtrfs",   "TitanBtrfs",   L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL},
+            {"TitanExt",     "TitanExt",     L"\\\\.\\pipe\\titanext_ipc",   0x4558543449504331ULL}
         };
 
 #ifdef _WIN32
@@ -163,7 +164,8 @@ public:
             {FsFormat::ZFS,   L"\\\\.\\pipe\\titanzfs_ipc",   0x5A465349504331ULL},
             {FsFormat::ReFS,  L"\\\\.\\pipe\\titanrefs_ipc",  0x5245465349504331ULL},
             {FsFormat::NTFS,  L"\\\\.\\pipe\\titanntfs_ipc",  0x4E54465349504331ULL},
-            {FsFormat::Btrfs, L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL}
+            {FsFormat::Btrfs, L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL},
+            {FsFormat::Ext4,  L"\\\\.\\pipe\\titanext_ipc",   0x4558543449504331ULL}
         };
 
         for (const auto& s : svcs) {
@@ -386,6 +388,7 @@ public:
             case FsFormat::ReFS:  pipe = L"\\\\.\\pipe\\titanrefs_ipc";  magic = 0x5245465349504331ULL; break;
             case FsFormat::NTFS:  pipe = L"\\\\.\\pipe\\titanntfs_ipc";  magic = 0x4E54465349504331ULL; break;
             case FsFormat::Btrfs: pipe = L"\\\\.\\pipe\\titanbtrfs_ipc"; magic = 0x4254524653495031ULL; break;
+            case FsFormat::Ext4:  pipe = L"\\\\.\\pipe\\titanext_ipc";   magic = 0x4558543449504331ULL; break;
             default: err = "Unsupported filesystem format."; return false;
         }
 
@@ -414,6 +417,7 @@ public:
             case FsFormat::ReFS:  pipe = L"\\\\.\\pipe\\titanrefs_ipc";  magic = 0x5245465349504331ULL; break;
             case FsFormat::NTFS:  pipe = L"\\\\.\\pipe\\titanntfs_ipc";  magic = 0x4E54465349504331ULL; break;
             case FsFormat::Btrfs: pipe = L"\\\\.\\pipe\\titanbtrfs_ipc"; magic = 0x4254524653495031ULL; break;
+            case FsFormat::Ext4:  pipe = L"\\\\.\\pipe\\titanext_ipc";   magic = 0x4558543449504331ULL; break;
             default: err = "Unsupported filesystem format."; return false;
         }
 

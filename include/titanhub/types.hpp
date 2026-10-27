@@ -146,7 +146,7 @@ struct SubvolSnapshotEntry {
 
 struct ServiceTelemetry {
     std::string name;
-    std::string serviceId; // "TitanZFS", "TitanReFS", "TitanNTFS", "TitanBtrfs"
+    std::string serviceId; // "TitanZFS", "TitanReFS", "TitanNTFS", "TitanBtrfs", "TitanExt"
     std::string pipeName;
     bool        isInstalled{false};
     bool        isRunning{false};
