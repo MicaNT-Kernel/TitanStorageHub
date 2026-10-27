@@ -36,7 +36,7 @@ target_link_libraries(titanstoragehub_tests PRIVATE titanhub_core)
 if (WIN32)
     # Win32 Modern Desktop GUI Control Center
     add_executable(titanstoragehub WIN32 src/app/titanstoragehub.cpp)
-    target_link_libraries(titanstoragehub PRIVATE titanhub_core user32 gdi32 gdiplus comctl32 dwmapi uxtheme shell32 advapi32)
+    target_link_libraries(titanstoragehub PRIVATE titanhub_core user32 gdi32 gdiplus comctl32 comdlg32 dwmapi uxtheme shell32 advapi32)
 
     # Standalone Installer Packager
     add_executable(titanstoragehub_packager src/tools/titanstoragehub_packager.cpp)

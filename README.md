@@ -14,14 +14,24 @@
 ## Key Features
 
 - **Unified Multi-Engine Control**: Direct Named Pipe IPC integration (`\\.\pipe\titanzfs_ipc`, `\\.\pipe\titanrefs_ipc`, `\\.\pipe\titanntfs_ipc`, and `\\.\pipe\titanbtrfs_ipc`) communicating with all Titan filesystem services simultaneously.
-- **Automatic Filesystem Signature Detection (`DiskFormatDetector`)**: Instantly detects and categorizes disks and volume images using clean-room magic signatures:
+- **Automatic Filesystem Signature Detection (`DiskFormatDetector`)**: Instantly detects and categorizes disks, partitions, and image files using clean-room magic signatures:
   - **Btrfs**: `_BHRfS_M` at `0x10040` (64 KiB superblock offset)
   - **ReFS**: `"ReFS"` at byte offset `0x03`
   - **NTFS**: `"NTFS    "` at byte offset `0x03`
   - **ZFS**: Uberblock magic (`0x00bab10c`) & `zfs_pool` headers
+  - **FAT32 & FAT16/FAT12**: BPB signatures (`"FAT32   "`, `"FAT16   "`) & volume labels
+  - **exFAT**: `"EXFAT   "` at byte offset `0x03`
+  - **ext4 / ext3 / ext2**: Linux superblock magic `0xEF53` at `0x438`, extent incompat flags, and volume labels
+  - **XFS**: High-performance Linux superblock magic `"XFSB"` at offset `0x00`
+  - **F2FS**: Flash-friendly Android/Linux filesystem magic `0xF2F52010` at offset `0x400`
+  - **APFS & HFS+**: Apple filesystem container magic (`"NXSB"` at `0x20`) and Mac volume headers (`"H+"`)
+  - **ISO 9660 & UDF**: Optical media & installer images (`"CD001"`, `"NSR02"`, `"NSR03"`)
+  - **BitLocker**: Hardware/software encrypted volume headers (`"-FVE-FS-"`)
+  - **Linux Swap**: Partition swap signatures (`"SWAPSPACE2"`)
+- **System Drive & Physical Partition Auto-Discovery**: Automatically enumerates all active Windows logical drives (`C:\`, `D:\`, etc.), mounted Titan volumes, removable USB flash sticks, SDXC cards, optical media, and raw unmounted physical partitions (`\\.\PhysicalDriveX`).
 - **Real-Time Bit-Rot Scrubber & Health Center**: Visual progress meters, live sector counters, and error recovery telemetry tracking automated background scrub operations across all mounted pools and volumes.
 - **Subvolume & Snapshot Browser**: Inspect subvolume trees, snapshot hierarchies (`@`, `@home`, `@snapshots`), parent-child generations, and clone targets for Btrfs and ZFS datasets.
-- **Partition & Format Wizard**: Quick-format disk images or physical drives to ZFS, ReFS v3.12, NTFS, or Btrfs with customized sector sizes and volume labels.
+- **Partition & Format Wizard**: Quick-format disk images or physical drives to Btrfs, ReFS v3.12, NTFS, ZFS, FAT32, exFAT, ext4, or XFS with customized sector sizes, auto-detection on browse, and volume labels.
 - **Windows Background Service Monitor**: Live status, start/stop controls, and pipe health diagnostics for `TitanZFS`, `TitanReFS`, `TitanNTFS`, and `TitanBtrfs` Windows NT services.
 - **Modern Win32 Dark-Mode Architecture**: Left Navigation Sidebar layout (`980 x 640`), smooth Mica styling, GDI+ high-DPI hero graphics, and zero external GUI framework bloat.
 - **System Tray Agent**: Background minimization, system notification area integration, and quick drive access menu.

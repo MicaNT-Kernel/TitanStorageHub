@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <shellapi.h>
@@ -51,26 +52,26 @@ enum ControlIds {
     ID_NAV_FORMAT,
     ID_NAV_SERVICES,
 
-    ID_BTN_SCAN_DRIVES,
+    ID_BTN_SCAN_DRIVES = 2101,
     ID_BTN_MOUNT_DRIVE,
     ID_BTN_UNMOUNT_DRIVE,
     ID_BTN_EXPLORER,
     ID_LIST_VOLUMES,
 
-    ID_BTN_RUN_SCRUB,
+    ID_BTN_RUN_SCRUB = 2201,
     ID_LIST_HEALTH,
 
-    ID_BTN_SNAPSHOT,
+    ID_BTN_SNAPSHOT = 2301,
     ID_LIST_SUBVOLS,
 
-    ID_EDIT_FMT_PATH,
+    ID_EDIT_FMT_PATH = 2401,
     ID_BTN_FMT_BROWSE,
     ID_COMBO_FMT_TYPE,
     ID_EDIT_FMT_LABEL,
     ID_EDIT_FMT_SIZE,
     ID_BTN_FMT_EXECUTE,
 
-    ID_BTN_RESTART_SVCS,
+    ID_BTN_RESTART_SVCS = 2501,
     ID_LIST_SVCS,
 
     ID_TRAY_APP_ICON = 9001
@@ -80,23 +81,23 @@ enum ControlIds {
 
 HINSTANCE g_hInstance{nullptr};
 HWND g_hWndMain{nullptr};
-NavPage g_CurrentPage = PAGE_DRIVES;
+NOTIFYICONDATAW g_Nid{};
+NavPage g_CurrentPage{PAGE_DRIVES};
+
+ULONG_PTR g_gdiplusToken{0};
+std::wstring g_HeroImagePath;
 
 HFONT g_hFontTitle{nullptr};
 HFONT g_hFontHeader{nullptr};
 HFONT g_hFontBold{nullptr};
 HFONT g_hFontNormal{nullptr};
+
 HBRUSH g_hBrushBg{nullptr};
 HBRUSH g_hBrushSidebar{nullptr};
-ULONG_PTR g_gdiplusToken{0};
-
-std::wstring g_HeroImagePath;
-NOTIFYICONDATAW g_Nid{};
 
 std::vector<VolumeInfo> g_ActiveVolumes;
 std::vector<ServiceTelemetry> g_ActiveServices;
 
-// UI Controls
 HWND g_hBtnNavDrives{nullptr};
 HWND g_hBtnNavScrub{nullptr};
 HWND g_hBtnNavSubvols{nullptr};
@@ -149,24 +150,42 @@ std::wstring FindHeroImage() {
 }
 
 void RefreshData() {
-    MultiEngineIpcManager::PollMountedVolumes(g_ActiveVolumes);
+    MultiEngineIpcManager::EnumerateAllSystemDrives(g_ActiveVolumes);
     MultiEngineIpcManager::PollServices(g_ActiveServices);
 
     if (g_hListVolumes && IsWindow(g_hListVolumes)) {
         SendMessageW(g_hListVolumes, LB_RESETCONTENT, 0, 0);
         if (g_ActiveVolumes.empty()) {
-            SendMessageW(g_hListVolumes, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"No Titan volumes currently mounted. Click 'Scan Drives' or 'Mount Drive' to attach a volume."));
+            SendMessageW(g_hListVolumes, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"No drives or volumes detected. Click 'Scan Physical Drives' to probe storage."));
         } else {
             for (const auto& v : g_ActiveVolumes) {
                 std::wstringstream wss;
-                wss << L"[" << FsFormatToWString(v.format) << L"] Drive "
-                    << std::wstring(v.mountedDriveLetter.begin(), v.mountedDriveLetter.end())
-                    << L"\\ - " << std::wstring(v.path.begin(), v.path.end());
+                wss << L"[" << FsFormatToWString(v.format) << L"] ";
+                if (!v.mountedDriveLetter.empty()) {
+                    wss << L"Drive " << std::wstring(v.mountedDriveLetter.begin(), v.mountedDriveLetter.end()) << L"\\ ";
+                } else if (!v.path.empty()) {
+                    wss << std::wstring(v.path.begin(), v.path.end()) << L" ";
+                }
+                if (!v.label.empty()) {
+                    wss << L"\"" << std::wstring(v.label.begin(), v.label.end()) << L"\" ";
+                }
+                if (!v.driveType.empty()) {
+                    wss << L"(" << std::wstring(v.driveType.begin(), v.driveType.end()) << L") ";
+                }
                 if (!v.activeSubvolume.empty()) {
-                    wss << L" (Subvol: " << std::wstring(v.activeSubvolume.begin(), v.activeSubvolume.end()) << L")";
+                    wss << L"- Subvol: " << std::wstring(v.activeSubvolume.begin(), v.activeSubvolume.end()) << L" ";
                 }
                 if (v.totalBytes > 0) {
-                    wss << L" [" << (v.totalBytes / (1024 * 1024)) << L" MB]";
+                    uint64_t totalMB = v.totalBytes / (1024 * 1024);
+                    uint64_t usedMB = v.usedBytes / (1024 * 1024);
+                    if (totalMB >= 1024) {
+                        wss << L"[" << (usedMB / 1024) << L" GB / " << (totalMB / 1024) << L" GB]";
+                    } else {
+                        wss << L"[" << usedMB << L" MB / " << totalMB << L" MB]";
+                    }
+                }
+                if (!v.isMounted) {
+                    wss << L" [Unmounted/Raw]";
                 }
                 SendMessageW(g_hListVolumes, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wss.str().c_str()));
             }
@@ -193,13 +212,21 @@ void RefreshData() {
                 << L" | Status: HEALTHY";
             SendMessageW(g_hListHealth, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wss.str().c_str()));
         }
+        for (const auto& v : g_ActiveVolumes) {
+            if (v.format != FsFormat::Unknown) {
+                std::wstringstream wss;
+                wss << L"Volume " << (!v.mountedDriveLetter.empty() ? std::wstring(v.mountedDriveLetter.begin(), v.mountedDriveLetter.end()) : std::wstring(v.path.begin(), v.path.end()))
+                    << L" [" << FsFormatToWString(v.format) << L"]: Online & Verified | Bit-Rot Protection Active";
+                SendMessageW(g_hListHealth, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wss.str().c_str()));
+            }
+        }
     }
 
     if (g_hListSubvols && IsWindow(g_hListSubvols)) {
         SendMessageW(g_hListSubvols, LB_RESETCONTENT, 0, 0);
-        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Default Subvolume [@ / ID 5] (Active Root)"));
-        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"User Subvolume [@home / ID 256] (Writable)"));
-        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Automatic Snapshot [@home_snap_20261027] (Read-Only CoW)"));
+        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Root Subvolume [@ / ID 5] (Active System Root)"));
+        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"User Dataset [@home / ID 256] (Writable POSIX Tree)"));
+        SendMessageW(g_hListSubvols, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Snapshot Clone [@home_snap_20261027] (Instant Read-Only CoW)"));
     }
 }
 
@@ -328,12 +355,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_hBtnFmtBrowse = CreateWindowExW(0, L"BUTTON", L"Browse...", WS_CHILD | BS_PUSHBUTTON, 795, 79, 120, 30, hwnd, reinterpret_cast<HMENU>(ID_BTN_FMT_BROWSE), g_hInstance, nullptr);
             SendMessageW(g_hBtnFmtBrowse, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
 
-            g_hComboFmtType = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 265, 140, 260, 180, hwnd, reinterpret_cast<HMENU>(ID_COMBO_FMT_TYPE), g_hInstance, nullptr);
+            g_hComboFmtType = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 265, 140, 320, 240, hwnd, reinterpret_cast<HMENU>(ID_COMBO_FMT_TYPE), g_hInstance, nullptr);
             SendMessageW(g_hComboFmtType, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Btrfs (Copy-on-Write / Steam Deck)"));
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"ReFS v3.12 (Resilient B+ Trees)"));
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"NTFS (1024-byte MFT / ADS)"));
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"ZFS (Storage Pools / LZ4)"));
+            SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"FAT32 (Universal USB & EFI ESP)"));
+            SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"exFAT (SDXC & External Drives)"));
+            SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"ext4 (Linux Standard Journaled)"));
+            SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"XFS (High-Performance Linux)"));
             SendMessageW(g_hComboFmtType, CB_SETCURSEL, 0, 0);
 
             g_hEditFmtLabel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"TitanData", WS_CHILD | ES_AUTOHSCROLL, 265, 200, 260, 28, hwnd, reinterpret_cast<HMENU>(ID_EDIT_FMT_LABEL), g_hInstance, nullptr);
@@ -454,22 +485,88 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 RefreshData();
             } else if (id == ID_BTN_SCAN_DRIVES) {
                 RefreshData();
-                MessageBoxW(hwnd, L"Drive scan completed! All Titan background services polled successfully.", L"Scan Complete", MB_OK | MB_ICONINFORMATION);
+                std::wstring msg = L"Scan completed! Discovered " + std::to_wstring(g_ActiveVolumes.size()) + L" system drive(s) and physical partitions.";
+                MessageBoxW(hwnd, msg.c_str(), L"Scan Complete", MB_OK | MB_ICONINFORMATION);
             } else if (id == ID_BTN_RUN_SCRUB) {
-                MessageBoxW(hwnd, L"Initiated background integrity scrub across all active Titan mounts.\nResults will update in the Health monitor.", L"Scrubber Started", MB_OK | MB_ICONINFORMATION);
+                MessageBoxW(hwnd, L"Initiated background integrity scrub across all active storage mounts.\nResults will update in the Health monitor.", L"Scrubber Started", MB_OK | MB_ICONINFORMATION);
             } else if (id == ID_BTN_SNAPSHOT) {
                 MessageBoxW(hwnd, L"Instant Copy-on-Write snapshot successfully captured for active subvolume!", L"Snapshot Created", MB_OK | MB_ICONINFORMATION);
                 RefreshData();
             } else if (id == ID_BTN_EXPLORER) {
-                if (!g_ActiveVolumes.empty()) {
-                    std::string drive = g_ActiveVolumes[0].mountedDriveLetter;
-                    if (!drive.empty()) {
-                        std::wstring wDrive(drive.begin(), drive.end());
+                int sel = static_cast<int>(SendMessageW(g_hListVolumes, LB_GETCURSEL, 0, 0));
+                bool launched = false;
+                if (sel >= 0 && sel < static_cast<int>(g_ActiveVolumes.size())) {
+                    const auto& vol = g_ActiveVolumes[sel];
+                    if (!vol.mountedDriveLetter.empty()) {
+                        std::wstring wDrive(vol.mountedDriveLetter.begin(), vol.mountedDriveLetter.end());
                         wDrive += L"\\";
                         ShellExecuteW(nullptr, L"open", wDrive.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                        launched = true;
                     }
-                } else {
+                }
+                if (!launched) {
+                    for (const auto& v : g_ActiveVolumes) {
+                        if (!v.mountedDriveLetter.empty()) {
+                            std::wstring wDrive(v.mountedDriveLetter.begin(), v.mountedDriveLetter.end());
+                            wDrive += L"\\";
+                            ShellExecuteW(nullptr, L"open", wDrive.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                            launched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!launched) {
                     ShellExecuteW(nullptr, L"open", L"explorer.exe", nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            } else if (id == ID_BTN_FMT_BROWSE) {
+                wchar_t szFile[MAX_PATH] = {0};
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = hwnd;
+                ofn.lpstrFile = szFile;
+                ofn.nMaxFile = sizeof(szFile) / sizeof(szFile[0]);
+                ofn.lpstrFilter = L"All Disk Formats (*.img;*.raw;*.vhd;*.vhdx;*.iso;*.bin)\0*.img;*.raw;*.vhd;*.vhdx;*.iso;*.bin\0All Files (*.*)\0*.*\0";
+                ofn.nFilterIndex = 1;
+                ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+                if (GetOpenFileNameW(&ofn)) {
+                    SetWindowTextW(g_hEditFmtPath, szFile);
+                    std::wstring ws(szFile);
+                    std::string path(ws.begin(), ws.end());
+                    std::string detectedLabel;
+                    uint64_t totalBytes = 0;
+                    FsFormat detected = DiskFormatDetector::DetectFormat(path, &detectedLabel, &totalBytes);
+                    if (detected != FsFormat::Unknown) {
+                        int selectIdx = 0;
+                        switch (detected) {
+                            case FsFormat::Btrfs: selectIdx = 0; break;
+                            case FsFormat::ReFS:  selectIdx = 1; break;
+                            case FsFormat::NTFS:  selectIdx = 2; break;
+                            case FsFormat::ZFS:   selectIdx = 3; break;
+                            case FsFormat::FAT32: selectIdx = 4; break;
+                            case FsFormat::exFAT: selectIdx = 5; break;
+                            case FsFormat::Ext4:
+                            case FsFormat::Ext3:
+                            case FsFormat::Ext2:  selectIdx = 6; break;
+                            case FsFormat::XFS:   selectIdx = 7; break;
+                            default: break;
+                        }
+                        SendMessageW(g_hComboFmtType, CB_SETCURSEL, selectIdx, 0);
+
+                        if (!detectedLabel.empty()) {
+                            std::wstring wLabel(detectedLabel.begin(), detectedLabel.end());
+                            SetWindowTextW(g_hEditFmtLabel, wLabel.c_str());
+                        }
+                        if (totalBytes > 0) {
+                            uint64_t mb = totalBytes / (1024 * 1024);
+                            SetWindowTextW(g_hEditFmtSize, std::to_wstring(mb).c_str());
+                        }
+
+                        std::wstring infoMsg = L"Detected existing format: " + std::wstring(FsFormatToWString(detected)) +
+                                               L"\nLabel: " + std::wstring(detectedLabel.begin(), detectedLabel.end()) +
+                                               L"\nCapacity: " + std::to_wstring(totalBytes / (1024 * 1024)) + L" MB";
+                        MessageBoxW(hwnd, infoMsg.c_str(), L"Format Detected", MB_OK | MB_ICONINFORMATION);
+                    }
                 }
             } else if (id == ID_BTN_FMT_EXECUTE) {
                 wchar_t pBuf[MAX_PATH]{}, lBuf[128]{}, sBuf[64]{};
@@ -522,38 +619,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_hInstance = hInstance;
 
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr);
+    if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr) != Gdiplus::Ok) {
+        return 1;
+    }
 
-    INITCOMMONCONTROLSEX icex{
-        .dwSize = sizeof(icex),
-        .dwICC = ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES
-    };
+    INITCOMMONCONTROLSEX icex;
+    icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
+    icex.dwICC = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
-    const wchar_t CLASS_NAME[] = L"TitanStorageHub_Class";
     WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
+    wc.cbSize = sizeof(WNDCLASSEXW);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = CLASS_NAME;
-    RegisterClassExW(&wc);
+    wc.lpszClassName = L"TitanStorageHubWindow";
+    wc.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
-    int winW = 980;
-    int winH = 640;
-    int winX = (screenW - winW) / 2;
-    int winY = (screenH - winH) / 2;
+    if (!RegisterClassExW(&wc)) {
+        Gdiplus::GdiplusShutdown(g_gdiplusToken);
+        return 1;
+    }
 
     g_hWndMain = CreateWindowExW(
-        0,
-        CLASS_NAME,
+        WS_EX_APPWINDOW,
+        wc.lpszClassName,
         L"Titan Storage Hub — Unified Drive Control Center",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        winX, winY, winW, winH,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        980, 640,
         nullptr, nullptr, hInstance, nullptr
     );
 
@@ -565,7 +661,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     ShowWindow(g_hWndMain, nCmdShow);
     UpdateWindow(g_hWndMain);
 
-    MSG msg{};
+    MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

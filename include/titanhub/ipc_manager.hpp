@@ -1,6 +1,7 @@
 #pragma once
 
 #include "titanhub/types.hpp"
+#include "titanhub/detector.hpp"
 #include <string>
 #include <vector>
 #include <sstream>
@@ -15,6 +16,7 @@
 #endif
 #include <windows.h>
 #include <winsvc.h>
+#include <winioctl.h>
 #endif
 
 namespace titanhub {
@@ -167,7 +169,6 @@ public:
         for (const auto& s : svcs) {
             std::string resp;
             if (SendPipeCommand(s.pipe, s.magic, 7 /* IpcCmdListMounts */, "", resp, 250)) {
-                // Parse simple json: {"mounts":[{"drive":"B:","device":"...","subvol":"@","totalBytes":123456}]}
                 size_t pos = 0;
                 while ((pos = resp.find("{\"drive\":\"", pos)) != std::string::npos) {
                     pos += 10;
@@ -202,6 +203,8 @@ public:
                     vol.path = dev;
                     vol.mountedDriveLetter = drive;
                     vol.activeSubvolume = subvol;
+                    vol.fileSystemName = FsFormatToString(s.fmt);
+                    vol.driveType = "Titan Virtual (" + std::string(FsFormatToString(s.fmt)) + ")";
                     vol.totalBytes = totalBytes;
                     vol.isMounted = true;
                     vol.isPhysical = (dev.find("\\\\.\\") == 0);
@@ -211,6 +214,167 @@ public:
                 }
             }
         }
+    }
+
+    static void EnumerateAllSystemDrives(std::vector<VolumeInfo>& outVolumes) {
+        outVolumes.clear();
+
+        // 1. Collect all Titan-mounted volumes via IPC
+        std::vector<VolumeInfo> titanMounts;
+        PollMountedVolumes(titanMounts);
+
+#ifdef _WIN32
+        // 2. Query all Windows logical drive strings (A:\, C:\, D:\, etc.)
+        wchar_t driveStrings[512]{0};
+        DWORD len = GetLogicalDriveStringsW(511, driveStrings);
+        if (len > 0) {
+            const wchar_t* pDrive = driveStrings;
+            while (*pDrive) {
+                std::wstring rootPath = pDrive; // e.g. L"C:\\"
+                std::string driveLetter;
+                if (rootPath.size() >= 2) {
+                    driveLetter = std::string(rootPath.begin(), rootPath.begin() + 2);
+                }
+
+                // Check if this drive letter is managed by a Titan service
+                bool isTitan = false;
+                for (const auto& tm : titanMounts) {
+                    if (tm.mountedDriveLetter == driveLetter) {
+                        VolumeInfo augmented = tm;
+                        augmented.driveType = "Titan Virtual (" + std::string(FsFormatToString(tm.format)) + ")";
+                        outVolumes.push_back(augmented);
+                        isTitan = true;
+                        break;
+                    }
+                }
+
+                if (!isTitan) {
+                    UINT driveType = GetDriveTypeW(rootPath.c_str());
+                    if (driveType != DRIVE_NO_ROOT_DIR) {
+                        wchar_t volName[MAX_PATH + 1]{0};
+                        wchar_t fsName[MAX_PATH + 1]{0};
+                        DWORD serialNum = 0, maxComponentLen = 0, flags = 0;
+
+                        GetVolumeInformationW(
+                            rootPath.c_str(),
+                            volName, MAX_PATH,
+                            &serialNum, &maxComponentLen, &flags,
+                            fsName, MAX_PATH
+                        );
+
+                        ULARGE_INTEGER freeBytesAvail{}, totalBytes{}, totalFreeBytes{};
+                        GetDiskFreeSpaceExW(rootPath.c_str(), &freeBytesAvail, &totalBytes, &totalFreeBytes);
+
+                        VolumeInfo vol;
+                        vol.mountedDriveLetter = driveLetter;
+                        vol.path = std::string(rootPath.begin(), rootPath.end());
+                        vol.isMounted = true;
+                        vol.isPhysical = (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE);
+
+                        std::wstring wVol(volName);
+                        vol.label = std::string(wVol.begin(), wVol.end());
+                        if (vol.label.empty()) {
+                            vol.label = (driveType == DRIVE_FIXED) ? "Local Disk" : "Removable Drive";
+                        }
+
+                        std::wstring wFs(fsName);
+                        vol.fileSystemName = std::string(wFs.begin(), wFs.end());
+                        vol.format = ParseFsFormatString(vol.fileSystemName);
+
+                        vol.totalBytes = totalBytes.QuadPart;
+                        vol.usedBytes = (totalBytes.QuadPart >= totalFreeBytes.QuadPart)
+                                            ? (totalBytes.QuadPart - totalFreeBytes.QuadPart) : 0;
+
+                        switch (driveType) {
+                            case DRIVE_FIXED:     vol.driveType = "Fixed SSD/HDD"; break;
+                            case DRIVE_REMOVABLE: vol.driveType = "Removable USB / SD"; break;
+                            case DRIVE_CDROM:     vol.driveType = "Optical / ISO"; break;
+                            case DRIVE_REMOTE:    vol.driveType = "Network Share"; break;
+                            case DRIVE_RAMDISK:   vol.driveType = "RAM Disk"; break;
+                            default:              vol.driveType = "System Volume"; break;
+                        }
+
+                        outVolumes.push_back(vol);
+                    }
+                }
+
+                pDrive += rootPath.length() + 1;
+            }
+        }
+
+        // Add any remaining Titan mounts not covered in logical strings
+        for (const auto& tm : titanMounts) {
+            bool found = false;
+            for (const auto& v : outVolumes) {
+                if (v.mountedDriveLetter == tm.mountedDriveLetter) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                VolumeInfo v = tm;
+                v.driveType = "Titan Virtual (" + std::string(FsFormatToString(tm.format)) + ")";
+                outVolumes.push_back(v);
+            }
+        }
+
+        // 3. Probe physical drives \\.\PhysicalDrive0 .. 7 for unmounted raw filesystems
+        for (int i = 0; i < 8; ++i) {
+            std::string physPath = "\\\\.\\PhysicalDrive" + std::to_string(i);
+            std::wstring wPhysPath(physPath.begin(), physPath.end());
+
+            HANDLE hDisk = CreateFileW(
+                wPhysPath.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr
+            );
+
+            if (hDisk != INVALID_HANDLE_VALUE) {
+                std::vector<uint8_t> buffer(131072, 0);
+                DWORD readBytes = 0;
+                if (ReadFile(hDisk, buffer.data(), static_cast<DWORD>(buffer.size()), &readBytes, nullptr) && readBytes >= 512) {
+                    std::string label;
+                    buffer.resize(readBytes);
+                    FsFormat detected = DiskFormatDetector::DetectFormatFromBuffer(buffer, &label);
+                    if (detected != FsFormat::Unknown) {
+                        bool exists = false;
+                        for (const auto& v : outVolumes) {
+                            if (v.path == physPath) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) {
+                            VolumeInfo pVol;
+                            pVol.path = physPath;
+                            pVol.format = detected;
+                            pVol.label = label.empty() ? ("Drive " + std::to_string(i)) : label;
+                            pVol.fileSystemName = FsFormatToString(detected);
+                            pVol.driveType = "Physical Disk (Raw/Unmounted)";
+                            pVol.isPhysical = true;
+                            pVol.isMounted = false;
+
+                            DISK_GEOMETRY_EX geom{};
+                            DWORD bytesReturned = 0;
+                            if (DeviceIoControl(hDisk, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, &geom, sizeof(geom), &bytesReturned, nullptr)) {
+                                pVol.totalBytes = static_cast<uint64_t>(geom.DiskSize.QuadPart);
+                            }
+                            outVolumes.push_back(pVol);
+                        }
+                    }
+                }
+                CloseHandle(hDisk);
+            }
+        }
+#else
+        for (const auto& tm : titanMounts) {
+            outVolumes.push_back(tm);
+        }
+#endif
     }
 
     static bool MountVolume(FsFormat fmt, const std::string& dev, const std::string& drive,
