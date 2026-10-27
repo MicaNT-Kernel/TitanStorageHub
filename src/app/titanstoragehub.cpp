@@ -366,6 +366,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"exFAT (SDXC & External Drives)"));
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"ext4 (Linux Standard Journaled)"));
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"XFS (High-Performance Linux)"));
+            SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"F2FS (Samsung Flash-Friendly)"));
             SendMessageW(g_hComboFmtType, CB_SETCURSEL, 0, 0);
 
             g_hEditFmtLabel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"TitanData", WS_CHILD | ES_AUTOHSCROLL, 265, 200, 260, 28, hwnd, reinterpret_cast<HMENU>(ID_EDIT_FMT_LABEL), g_hInstance, nullptr);

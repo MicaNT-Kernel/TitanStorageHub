@@ -107,7 +107,8 @@ public:
             {"TitanNTFS",    "TitanNTFS",    L"\\\\.\\pipe\\titanntfs_ipc",  0x4E54465349504331ULL},
             {"TitanBtrfs",   "TitanBtrfs",   L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL},
             {"TitanExt",     "TitanExt",     L"\\\\.\\pipe\\titanext_ipc",   0x4558543449504331ULL},
-            {"TitanXFS",     "TitanXFS",     L"\\\\.\\pipe\\titanxfs_ipc",   0x58465349504331ULL}
+            {"TitanXFS",     "TitanXFS",     L"\\\\.\\pipe\\titanxfs_ipc",   0x58465349504331ULL},
+            {"TitanF2FS",    "TitanF2FS",    L"\\\\.\\pipe\\titanf2fs_ipc",  0x4632465349504331ULL}
         };
 
 #ifdef _WIN32
@@ -167,7 +168,8 @@ public:
             {FsFormat::NTFS,  L"\\\\.\\pipe\\titanntfs_ipc",  0x4E54465349504331ULL},
             {FsFormat::Btrfs, L"\\\\.\\pipe\\titanbtrfs_ipc", 0x4254524653495031ULL},
             {FsFormat::Ext4,  L"\\\\.\\pipe\\titanext_ipc",   0x4558543449504331ULL},
-            {FsFormat::XFS,   L"\\\\.\\pipe\\titanxfs_ipc",   0x58465349504331ULL}
+            {FsFormat::XFS,   L"\\\\.\\pipe\\titanxfs_ipc",   0x58465349504331ULL},
+            {FsFormat::F2FS,  L"\\\\.\\pipe\\titanf2fs_ipc",  0x4632465349504331ULL}
         };
 
         for (const auto& s : svcs) {
@@ -392,6 +394,7 @@ public:
             case FsFormat::Btrfs: pipe = L"\\\\.\\pipe\\titanbtrfs_ipc"; magic = 0x4254524653495031ULL; break;
             case FsFormat::Ext4:  pipe = L"\\\\.\\pipe\\titanext_ipc";   magic = 0x4558543449504331ULL; break;
             case FsFormat::XFS:   pipe = L"\\\\.\\pipe\\titanxfs_ipc";   magic = 0x58465349504331ULL; break;
+            case FsFormat::F2FS:  pipe = L"\\\\.\\pipe\\titanf2fs_ipc";  magic = 0x4632465349504331ULL; break;
             default: err = "Unsupported filesystem format."; return false;
         }
 
@@ -422,6 +425,7 @@ public:
             case FsFormat::Btrfs: pipe = L"\\\\.\\pipe\\titanbtrfs_ipc"; magic = 0x4254524653495031ULL; break;
             case FsFormat::Ext4:  pipe = L"\\\\.\\pipe\\titanext_ipc";   magic = 0x4558543449504331ULL; break;
             case FsFormat::XFS:   pipe = L"\\\\.\\pipe\\titanxfs_ipc";   magic = 0x58465349504331ULL; break;
+            case FsFormat::F2FS:  pipe = L"\\\\.\\pipe\\titanf2fs_ipc";  magic = 0x4632465349504331ULL; break;
             default: err = "Unsupported filesystem format."; return false;
         }
 
