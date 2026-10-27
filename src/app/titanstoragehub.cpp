@@ -17,6 +17,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <shellapi.h>
+#include <dbt.h>
 #include <objbase.h>
 #include <gdiplus.h>
 
@@ -396,6 +397,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             SwitchPage(PAGE_DRIVES);
             RefreshData();
+            SetTimer(hwnd, 1, 4000, nullptr);
             return 0;
         }
 
@@ -579,6 +581,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SwitchPage(PAGE_DRIVES);
                 RefreshData();
             }
+            if (LOWORD(wParam) == ID_LIST_VOLUMES && HIWORD(wParam) == LBN_DBLCLK) {
+                int sel = static_cast<int>(SendMessageW(g_hListVolumes, LB_GETCURSEL, 0, 0));
+                if (sel >= 0 && sel < static_cast<int>(g_ActiveVolumes.size())) {
+                    const auto& vol = g_ActiveVolumes[sel];
+                    if (!vol.mountedDriveLetter.empty()) {
+                        std::wstring wDrive(vol.mountedDriveLetter.begin(), vol.mountedDriveLetter.end());
+                        wDrive += L"\\";
+                        ShellExecuteW(nullptr, L"open", wDrive.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                }
+            }
+            break;
+        }
+
+        case WM_TIMER: {
+            if (wParam == 1) {
+                RefreshData();
+            }
+            break;
+        }
+
+        case WM_DEVICECHANGE: {
+            // Real-time hot-plug / hot-unplug auto-refresh
+            RefreshData();
             break;
         }
 
@@ -599,6 +625,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_DESTROY: {
+            KillTimer(hwnd, 1);
             Shell_NotifyIconW(NIM_DELETE, &g_Nid);
             if (g_hFontTitle) DeleteObject(g_hFontTitle);
             if (g_hFontHeader) DeleteObject(g_hFontHeader);
