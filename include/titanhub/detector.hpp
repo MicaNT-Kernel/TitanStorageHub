@@ -45,13 +45,13 @@ public:
 
         // 2. Check ReFS Signature: "ReFS" at offset 0x03
         if (std::memcmp(buffer.data() + 3, "ReFS", 4) == 0) {
-            if (outLabel) *outLabel = "TITAN_REFS";
+            if (outLabel) *outLabel = "Resilient Volume";
             return FsFormat::ReFS;
         }
 
         // 3. Check NTFS Signature: "NTFS    " at offset 0x03
         if (std::memcmp(buffer.data() + 3, "NTFS    ", 8) == 0) {
-            if (outLabel) *outLabel = "TITAN_NTFS";
+            if (outLabel) *outLabel = "Local Disk";
             return FsFormat::NTFS;
         }
 
@@ -185,7 +185,7 @@ public:
                     char labelBuf[257]{0};
                     std::memcpy(labelBuf, buffer.data() + 0x1012F, 256);
                     *outLabel = cleanLabel(labelBuf, 256);
-                    if (outLabel->empty()) *outLabel = "TITAN_BTRFS";
+                    if (outLabel->empty()) *outLabel = "Btrfs";
                 }
                 return FsFormat::Btrfs;
             }
@@ -197,7 +197,7 @@ public:
             if (val == 0x00bab10cULL || val == 0x0cb1ba0000000000ULL ||
                 std::memcmp(buffer.data() + off, "zfs_pool", 8) == 0 ||
                 std::memcmp(buffer.data() + off, "spa_version", 11) == 0) {
-                if (outLabel) *outLabel = "TITAN_ZFS";
+                if (outLabel) *outLabel = "ZFS Pool";
                 return FsFormat::ZFS;
             }
         }

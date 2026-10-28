@@ -107,7 +107,7 @@ void TestDiskFormatDetector() {
         std::string outLabel;
         auto fmt = titanhub::DiskFormatDetector::DetectFormat(p.string(), &outLabel);
         TEST_ASSERT(fmt == titanhub::FsFormat::ReFS, "ReFS format detection");
-        TEST_ASSERT(outLabel == "TITAN_REFS", "ReFS label");
+        TEST_ASSERT(outLabel == "Resilient Volume", "ReFS label");
         fs::remove(p);
     }
 
@@ -124,7 +124,7 @@ void TestDiskFormatDetector() {
         std::string outLabel;
         auto fmt = titanhub::DiskFormatDetector::DetectFormat(p.string(), &outLabel);
         TEST_ASSERT(fmt == titanhub::FsFormat::NTFS, "NTFS format detection");
-        TEST_ASSERT(outLabel == "TITAN_NTFS", "NTFS label");
+        TEST_ASSERT(outLabel == "Local Disk", "NTFS label");
         fs::remove(p);
     }
 
@@ -282,7 +282,7 @@ void TestDiskFormatDetector() {
         std::string outLabel;
         auto fmt = titanhub::DiskFormatDetector::DetectFormat(p.string(), &outLabel);
         TEST_ASSERT(fmt == titanhub::FsFormat::ZFS, "ZFS format detection");
-        TEST_ASSERT(outLabel == "TITAN_ZFS", "ZFS label");
+        TEST_ASSERT(outLabel == "ZFS Pool", "ZFS label");
         fs::remove(p);
     }
 

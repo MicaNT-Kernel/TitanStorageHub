@@ -369,7 +369,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageW(g_hComboFmtType, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"F2FS (Samsung Flash-Friendly)"));
             SendMessageW(g_hComboFmtType, CB_SETCURSEL, 0, 0);
 
-            g_hEditFmtLabel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"TitanData", WS_CHILD | ES_AUTOHSCROLL, 265, 200, 260, 28, hwnd, reinterpret_cast<HMENU>(ID_EDIT_FMT_LABEL), g_hInstance, nullptr);
+            g_hEditFmtLabel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"New Volume", WS_CHILD | ES_AUTOHSCROLL, 265, 200, 260, 28, hwnd, reinterpret_cast<HMENU>(ID_EDIT_FMT_LABEL), g_hInstance, nullptr);
             SendMessageW(g_hEditFmtLabel, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
 
             g_hEditFmtSize = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"512", WS_CHILD | ES_AUTOHSCROLL, 265, 260, 160, 28, hwnd, reinterpret_cast<HMENU>(ID_EDIT_FMT_SIZE), g_hInstance, nullptr);
