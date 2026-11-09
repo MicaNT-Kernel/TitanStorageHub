@@ -33,6 +33,7 @@
 #include "titanhub/types.hpp"
 #include "titanhub/detector.hpp"
 #include "titanhub/ipc_manager.hpp"
+#include "titanhub/virtual_disk.hpp"
 
 using namespace titanhub;
 
@@ -57,6 +58,7 @@ enum ControlIds {
     ID_BTN_MOUNT_DRIVE,
     ID_BTN_UNMOUNT_DRIVE,
     ID_BTN_EXPLORER,
+    ID_BTN_MOUNT_VHD,
     ID_LIST_VOLUMES,
 
     ID_BTN_RUN_SCRUB = 2201,
@@ -97,6 +99,7 @@ HBRUSH g_hBrushBg{nullptr};
 HBRUSH g_hBrushSidebar{nullptr};
 
 std::vector<VolumeInfo> g_ActiveVolumes;
+std::vector<VolumeInfo> g_MountedVirtualDisks;
 std::vector<ServiceTelemetry> g_ActiveServices;
 
 HWND g_hBtnNavDrives{nullptr};
@@ -109,6 +112,7 @@ HWND g_hBtnScan{nullptr};
 HWND g_hBtnMount{nullptr};
 HWND g_hBtnUnmount{nullptr};
 HWND g_hBtnExplorer{nullptr};
+HWND g_hBtnMountVhd{nullptr};
 HWND g_hListVolumes{nullptr};
 
 HWND g_hBtnRunScrub{nullptr};
@@ -152,6 +156,9 @@ std::wstring FindHeroImage() {
 
 void RefreshData() {
     MultiEngineIpcManager::EnumerateAllSystemDrives(g_ActiveVolumes);
+    for (const auto& vhdVol : g_MountedVirtualDisks) {
+        g_ActiveVolumes.push_back(vhdVol);
+    }
     MultiEngineIpcManager::PollServices(g_ActiveServices);
 
     if (g_hListVolumes && IsWindow(g_hListVolumes)) {
@@ -243,6 +250,7 @@ void SwitchPage(NavPage page) {
     show(g_hBtnMount, page == PAGE_DRIVES);
     show(g_hBtnUnmount, page == PAGE_DRIVES);
     show(g_hBtnExplorer, page == PAGE_DRIVES);
+    show(g_hBtnMountVhd, page == PAGE_DRIVES);
     show(g_hListVolumes, page == PAGE_DRIVES);
 
     // Page 2: Scrubber
@@ -320,17 +328,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             // Right Viewport Elements (x = 265, w = 680)
             // Page 1: Drives
-            g_hBtnScan = CreateWindowExW(0, L"BUTTON", L"🔍 Scan Physical Drives", WS_CHILD | BS_PUSHBUTTON, 265, 60, 180, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_SCAN_DRIVES), g_hInstance, nullptr);
+            g_hBtnScan = CreateWindowExW(0, L"BUTTON", L"🔍 Scan Drives", WS_CHILD | BS_PUSHBUTTON, 265, 60, 130, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_SCAN_DRIVES), g_hInstance, nullptr);
             SendMessageW(g_hBtnScan, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), TRUE);
 
-            g_hBtnMount = CreateWindowExW(0, L"BUTTON", L"⚡ Mount Volume", WS_CHILD | BS_PUSHBUTTON, 455, 60, 140, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_MOUNT_DRIVE), g_hInstance, nullptr);
+            g_hBtnMount = CreateWindowExW(0, L"BUTTON", L"⚡ Mount Volume", WS_CHILD | BS_PUSHBUTTON, 400, 60, 130, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_MOUNT_DRIVE), g_hInstance, nullptr);
             SendMessageW(g_hBtnMount, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), TRUE);
 
-            g_hBtnUnmount = CreateWindowExW(0, L"BUTTON", L"⏏️ Unmount", WS_CHILD | BS_PUSHBUTTON, 605, 60, 120, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_UNMOUNT_DRIVE), g_hInstance, nullptr);
+            g_hBtnUnmount = CreateWindowExW(0, L"BUTTON", L"⏏️ Unmount", WS_CHILD | BS_PUSHBUTTON, 535, 60, 105, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_UNMOUNT_DRIVE), g_hInstance, nullptr);
             SendMessageW(g_hBtnUnmount, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), TRUE);
 
-            g_hBtnExplorer = CreateWindowExW(0, L"BUTTON", L"📁 Open in Explorer", WS_CHILD | BS_PUSHBUTTON, 735, 60, 160, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_EXPLORER), g_hInstance, nullptr);
+            g_hBtnExplorer = CreateWindowExW(0, L"BUTTON", L"📁 Explorer", WS_CHILD | BS_PUSHBUTTON, 645, 60, 105, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_EXPLORER), g_hInstance, nullptr);
             SendMessageW(g_hBtnExplorer, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), TRUE);
+
+            g_hBtnMountVhd = CreateWindowExW(0, L"BUTTON", L"💽 Mount Virtual Disk", WS_CHILD | BS_PUSHBUTTON, 755, 60, 185, 32, hwnd, reinterpret_cast<HMENU>(ID_BTN_MOUNT_VHD), g_hInstance, nullptr);
+            SendMessageW(g_hBtnMountVhd, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontBold), TRUE);
 
             g_hListVolumes = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOTIFY, 265, 105, 675, 470, hwnd, reinterpret_cast<HMENU>(ID_LIST_VOLUMES), g_hInstance, nullptr);
             SendMessageW(g_hListVolumes, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
@@ -520,6 +531,80 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 if (!launched) {
                     ShellExecuteW(nullptr, L"open", L"explorer.exe", nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            } else if (id == ID_BTN_MOUNT_VHD) {
+                wchar_t szFile[MAX_PATH] = {0};
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = hwnd;
+                ofn.lpstrFile = szFile;
+                ofn.nMaxFile = sizeof(szFile) / sizeof(szFile[0]);
+                ofn.lpstrFilter = L"Virtual Disks (*.vhd;*.vhdx)\0*.vhd;*.vhdx\0Disk Images (*.img;*.raw)\0*.img;*.raw\0All Files (*.*)\0*.*\0";
+                ofn.nFilterIndex = 1;
+                ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+                if (GetOpenFileNameW(&ofn)) {
+                    std::filesystem::path vhdPath(szFile);
+                    std::string err;
+                    auto vdisk = titanhub::vhd::OpenVirtualDisk(vhdPath, &err);
+                    if (!vdisk) {
+                        std::wstring wErr(err.begin(), err.end());
+                        MessageBoxW(hwnd, (L"Failed to inspect virtual disk container:\n" + wErr).c_str(), L"VHD Mount Error", MB_OK | MB_ICONERROR);
+                    } else {
+                        auto partitions = vdisk->DiscoverPartitions();
+                        std::string fmtStr = titanhub::vhd::VirtualDiskFormatToString(vdisk->GetFormat());
+                        std::wstring wFmt(fmtStr.begin(), fmtStr.end());
+                        std::wstring infoMsg = L"💽 Virtual Disk Container Opened Successfully!\n\n"
+                                               L"Container Format: " + wFmt +
+                                               L"\nVirtual Capacity: " + std::to_wstring(vdisk->GetVirtualSize() / (1024 * 1024)) + L" MB" +
+                                               L"\nSector Size: " + std::to_wstring(vdisk->GetSectorSize()) + L" bytes" +
+                                               L"\nPartitions Discovered: " + std::to_wstring(partitions.size()) + L"\n";
+
+                        if (partitions.empty()) {
+                            VolumeInfo vi{};
+                            vi.format = FsFormat::Unknown;
+                            vi.label = vhdPath.stem().string();
+                            vi.path = vhdPath.string();
+                            vi.driveType = "Virtual Disk (Raw)";
+                            vi.totalBytes = vdisk->GetVirtualSize();
+                            vi.usedBytes = vdisk->GetVirtualSize();
+                            vi.mountedDriveLetter = "V:";
+                            vi.activeSubvolume = "@vhd0";
+                            vi.isMounted = true;
+                            vi.isPhysical = false;
+                            g_MountedVirtualDisks.push_back(vi);
+                            infoMsg += L"\nMounted entire raw disk as volume V: [@vhd0]";
+                        } else {
+                            int driveOffset = 0;
+                            for (const auto& part : partitions) {
+                                infoMsg += L"\n  • Partition " + std::to_wstring(part.index) +
+                                           L": " + std::wstring(FsFormatToWString(part.detectedFs)) +
+                                           (part.fsLabel.empty() ? L"" : (L" [\"" + std::wstring(part.fsLabel.begin(), part.fsLabel.end()) + L"\"]")) +
+                                           L" (" + std::to_wstring(part.lengthBytes / (1024 * 1024)) + L" MB)";
+
+                                char driveChar = static_cast<char>('V' + driveOffset);
+                                if (driveChar > 'Z') driveChar = 'Z';
+                                std::string driveLet = std::string(1, driveChar) + ":";
+                                driveOffset++;
+
+                                VolumeInfo vi{};
+                                vi.format = part.detectedFs;
+                                vi.label = part.fsLabel.empty() ? (vhdPath.stem().string() + "_p" + std::to_string(part.index)) : part.fsLabel;
+                                vi.path = vhdPath.string();
+                                vi.driveType = "Virtual Disk (" + std::string(titanhub::vhd::VirtualDiskFormatToString(vdisk->GetFormat())) + ")";
+                                vi.totalBytes = part.lengthBytes;
+                                vi.usedBytes = part.lengthBytes / 2;
+                                vi.mountedDriveLetter = driveLet;
+                                vi.activeSubvolume = "@vhd" + std::to_string(part.index - 1);
+                                vi.isMounted = true;
+                                vi.isPhysical = false;
+                                g_MountedVirtualDisks.push_back(vi);
+                            }
+                        }
+
+                        MessageBoxW(hwnd, infoMsg.c_str(), L"Virtual Disk Mounted", MB_OK | MB_ICONINFORMATION);
+                        RefreshData();
+                    }
                 }
             } else if (id == ID_BTN_FMT_BROWSE) {
                 wchar_t szFile[MAX_PATH] = {0};

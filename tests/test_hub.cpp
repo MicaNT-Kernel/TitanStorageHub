@@ -2,6 +2,7 @@
 #include "titanhub/detector.hpp"
 #include "titanhub/compression.hpp"
 #include "titanhub/ipc_manager.hpp"
+#include "titanhub/virtual_disk.hpp"
 
 #include <iostream>
 #include <cassert>
@@ -406,6 +407,259 @@ void TestTypesAndTelemetry() {
     TEST_ASSERT(vol.isMounted && vol.isPhysical, "VolumeInfo flags");
 }
 
+void TestVirtualDiskVhdFixed() {
+    std::cout << "\n=== TestVirtualDiskVhdFixed ===\n";
+    fs::path tempDir = fs::temp_directory_path() / "titanhub_tests";
+    fs::create_directories(tempDir);
+    fs::path vhdPath = tempDir / "test_fixed.vhd";
+
+    constexpr uint64_t VIRTUAL_SIZE = 1048576; // 1 MB
+    std::vector<uint8_t> diskData(VIRTUAL_SIZE + 512, 0);
+
+    // 1. Create MBR partition table at sector 0
+    diskData[510] = 0x55;
+    diskData[511] = 0xAA;
+    // Partition 1: Active, starts at sector 128 (offset 65536 = 64KB), length = 1024 sectors
+    diskData[446 + 0] = 0x80; // Active
+    diskData[446 + 4] = 0x83; // Linux native partition
+    uint32_t startLba = 128;
+    uint32_t sectorCount = 1024;
+    std::memcpy(&diskData[446 + 8], &startLba, 4);
+    std::memcpy(&diskData[446 + 12], &sectorCount, 4);
+
+    // 2. Put Btrfs Superblock inside Partition 1 at offset 0x10040 (65536 + 65600 = 131136)
+    const uint64_t btrfsOffset = (128 * 512) + 0x10040;
+    std::memcpy(&diskData[btrfsOffset], "_BHRfS_M", 8);
+    const char* label = "VHD_BTRFS";
+    std::memcpy(&diskData[(128 * 512) + 0x1012F], label, std::strlen(label));
+
+    // 3. Write VhdFooter at end of file (offset VIRTUAL_SIZE)
+    auto* footer = reinterpret_cast<titanhub::vhd::VhdFooter*>(&diskData[VIRTUAL_SIZE]);
+    std::memcpy(footer->cookie, titanhub::vhd::VHD_COOKIE_FOOTER, 8);
+    footer->features = titanhub::vhd::SwapBe32(0x00000002);
+    footer->fileFormatVersion = titanhub::vhd::SwapBe32(0x00010000);
+    footer->dataOffset = 0xFFFFFFFFFFFFFFFFULL; // Fixed disk
+    footer->currentSize = titanhub::vhd::SwapBe64(VIRTUAL_SIZE);
+    footer->originalSize = titanhub::vhd::SwapBe64(VIRTUAL_SIZE);
+    footer->diskType = titanhub::vhd::SwapBe32(static_cast<uint32_t>(titanhub::vhd::VhdDiskType::Fixed));
+
+    std::ofstream out(vhdPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(diskData.data()), diskData.size());
+    out.close();
+
+    // 4. Open and Verify via IVirtualDisk
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(vhdPath, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk fixed VHD succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::VhdFixed, "Format is VhdFixed");
+        TEST_ASSERT(vdisk->GetVirtualSize() == VIRTUAL_SIZE, "Virtual size is 1MB");
+        TEST_ASSERT(vdisk->GetSectorSize() == 512, "Sector size is 512");
+
+        // Verify partition discovery & filesystem probe
+        auto partitions = vdisk->DiscoverPartitions();
+        TEST_ASSERT(partitions.size() == 1, "1 partition discovered in VHD");
+        if (!partitions.empty()) {
+            TEST_ASSERT(partitions[0].startSector == 128, "Partition starts at sector 128");
+            TEST_ASSERT(partitions[0].detectedFs == titanhub::FsFormat::Btrfs, "Autodetected Btrfs inside VHD");
+            TEST_ASSERT(partitions[0].fsLabel == "VHD_BTRFS", "Extracted Btrfs label inside VHD");
+        }
+    }
+
+    vdisk.reset();
+    fs::remove(vhdPath);
+}
+
+void TestVirtualDiskVhdDynamic() {
+    std::cout << "\n=== TestVirtualDiskVhdDynamic ===\n";
+    fs::path tempDir = fs::temp_directory_path() / "titanhub_tests";
+    fs::create_directories(tempDir);
+    fs::path vhdPath = tempDir / "test_dynamic.vhd";
+
+    constexpr uint64_t VIRTUAL_SIZE = 4194304; // 4 MB (2 blocks of 2MB)
+    constexpr uint32_t BLOCK_SIZE = 2097152;  // 2 MB
+
+    // Layout:
+    // [0..511]: Footer
+    // [512..1535]: Dynamic Header (1024 bytes)
+    // [1536..2047]: BAT Table (512 bytes = 128 uint32 entries, we use 2)
+    // [2048..2559]: Block 0 Sector Bitmap (512 bytes)
+    // [2560..2560 + BLOCK_SIZE - 1]: Block 0 Payload Data
+    // [end]: Duplicate Footer
+    const uint64_t block0SectorOffset = 4; // sector 4 = offset 2048
+    const uint64_t totalFileSize = 2560 + BLOCK_SIZE + 512;
+    std::vector<uint8_t> fileBuf(totalFileSize, 0);
+
+    // 1. Footer at 0
+    auto* footer = reinterpret_cast<titanhub::vhd::VhdFooter*>(&fileBuf[0]);
+    std::memcpy(footer->cookie, titanhub::vhd::VHD_COOKIE_FOOTER, 8);
+    footer->features = titanhub::vhd::SwapBe32(0x00000002);
+    footer->fileFormatVersion = titanhub::vhd::SwapBe32(0x00010000);
+    footer->dataOffset = titanhub::vhd::SwapBe64(512); // Points to Dynamic Header
+    footer->currentSize = titanhub::vhd::SwapBe64(VIRTUAL_SIZE);
+    footer->originalSize = titanhub::vhd::SwapBe64(VIRTUAL_SIZE);
+    footer->diskType = titanhub::vhd::SwapBe32(static_cast<uint32_t>(titanhub::vhd::VhdDiskType::Dynamic));
+
+    // 2. Dynamic Header at 512
+    auto* dyn = reinterpret_cast<titanhub::vhd::VhdDynamicHeader*>(&fileBuf[512]);
+    std::memcpy(dyn->cookie, titanhub::vhd::VHD_COOKIE_DYNAMIC, 8);
+    dyn->dataOffset = 0xFFFFFFFFFFFFFFFFULL;
+    dyn->tableOffset = titanhub::vhd::SwapBe64(1536); // BAT offset
+    dyn->headerVersion = titanhub::vhd::SwapBe32(0x00010000);
+    dyn->maxTableEntries = titanhub::vhd::SwapBe32(2);
+    dyn->blockSize = titanhub::vhd::SwapBe32(BLOCK_SIZE);
+
+    // 3. BAT Table at 1536
+    uint32_t* bat = reinterpret_cast<uint32_t*>(&fileBuf[1536]);
+    bat[0] = titanhub::vhd::SwapBe32(static_cast<uint32_t>(block0SectorOffset)); // Block 0 allocated at sector 4
+    bat[1] = 0xFFFFFFFF; // Block 1 unallocated / sparse
+
+    // 4. Block 0 Payload at 2560: Write a signature string
+    const char* testMsg = "TITAN_DYNAMIC_VHD_BLOCK0_DATA";
+    std::memcpy(&fileBuf[2560], testMsg, std::strlen(testMsg));
+
+    // 5. Duplicate footer at end
+    std::memcpy(&fileBuf[2560 + BLOCK_SIZE], footer, 512);
+
+    std::ofstream out(vhdPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(fileBuf.data()), fileBuf.size());
+    out.close();
+
+    // Verify
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(vhdPath, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk dynamic VHD succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::VhdDynamic, "Format is VhdDynamic");
+        TEST_ASSERT(vdisk->GetVirtualSize() == VIRTUAL_SIZE, "Virtual size is 4MB");
+
+        // Read from Block 0 (allocated)
+        char readBuf[64]{};
+        bool readOk = vdisk->ReadBytes(0, 30, readBuf);
+        TEST_ASSERT(readOk, "Read allocated block succeeded");
+        TEST_ASSERT(std::string(readBuf) == testMsg, "Block 0 data matches expected pattern");
+
+        // Read from Block 1 (unallocated / sparse)
+        std::vector<uint8_t> sparseBuf(1024, 0xAA);
+        readOk = vdisk->ReadBytes(BLOCK_SIZE, sparseBuf.size(), sparseBuf.data());
+        TEST_ASSERT(readOk, "Read unallocated sparse block succeeded");
+        bool allZero = true;
+        for (uint8_t b : sparseBuf) {
+            if (b != 0) { allZero = false; break; }
+        }
+        TEST_ASSERT(allZero, "Sparse unallocated block returns pure zeros");
+    }
+
+    vdisk.reset();
+    fs::remove(vhdPath);
+}
+
+void TestVirtualDiskVhdx() {
+    std::cout << "\n=== TestVirtualDiskVhdx ===\n";
+    fs::path tempDir = fs::temp_directory_path() / "titanhub_tests";
+    fs::create_directories(tempDir);
+    fs::path vhdxPath = tempDir / "test_modern.vhdx";
+
+    // VHDX Minimal layout:
+    // Offset 0: VhdxFileIdentifier ("vhdxfile")
+    // Offset 0x30000 (192KB): Region Table Header ("regi")
+    // Region 0: BAT at 0x100000 (1MB)
+    // Region 1: Metadata at 0x200000 (2MB)
+    // BAT Entry 0: points to payload block at 0x300000 (3MB)
+    constexpr uint64_t FILE_SIZE = 0x400000; // 4MB
+    constexpr uint64_t VIRTUAL_SIZE = 16777216; // 16MB virtual disk
+    constexpr uint32_t BLOCK_SIZE = 1048576; // 1MB block size
+    constexpr uint32_t SECTOR_SIZE = 512;
+
+    std::vector<uint8_t> vhdxData(FILE_SIZE, 0);
+
+    // 1. Signature at offset 0
+    std::memcpy(&vhdxData[0], titanhub::vhd::VHDX_FILE_IDENTIFIER, 8);
+
+    // 2. Region Table Header at 0x30000
+    auto* regHeader = reinterpret_cast<titanhub::vhd::VhdxRegionTableHeader*>(&vhdxData[0x30000]);
+    std::memcpy(regHeader->signature, titanhub::vhd::VHDX_REGION_SIGNATURE, 4);
+    regHeader->entryCount = 2;
+
+    // Entry 0: BAT
+    std::memcpy(regHeader->entries[0].guid, titanhub::vhd::VHDX_BAT_GUID, 16);
+    regHeader->entries[0].fileOffset = 0x100000; // 1MB
+    regHeader->entries[0].length = 65536;
+
+    // Entry 1: Metadata
+    std::memcpy(regHeader->entries[1].guid, titanhub::vhd::VHDX_METADATA_GUID, 16);
+    regHeader->entries[1].fileOffset = 0x200000; // 2MB
+    regHeader->entries[1].length = 65536;
+
+    // 3. Metadata Region at 0x200000
+    auto* metaHeader = reinterpret_cast<titanhub::vhd::VhdxMetadataTableHeader*>(&vhdxData[0x200000]);
+    std::memcpy(metaHeader->signature, titanhub::vhd::VHDX_METADATA_SIGNATURE, 8);
+    metaHeader->entryCount = 3;
+
+    auto* metaEntries = reinterpret_cast<titanhub::vhd::VhdxMetadataEntry*>(&vhdxData[0x200000 + sizeof(titanhub::vhd::VhdxMetadataTableHeader)]);
+    
+    // Metadata Item 0: Virtual Disk Size (uint64_t)
+    std::memcpy(metaEntries[0].itemId, titanhub::vhd::VHDX_META_DISK_SIZE_GUID, 16);
+    metaEntries[0].offset = 4096;
+    metaEntries[0].length = 8;
+    *reinterpret_cast<uint64_t*>(&vhdxData[0x200000 + 4096]) = VIRTUAL_SIZE;
+
+    // Metadata Item 1: Sector Size (uint32_t)
+    std::memcpy(metaEntries[1].itemId, titanhub::vhd::VHDX_META_SECTOR_SIZE_GUID, 16);
+    metaEntries[1].offset = 4112;
+    metaEntries[1].length = 4;
+    *reinterpret_cast<uint32_t*>(&vhdxData[0x200000 + 4112]) = SECTOR_SIZE;
+
+    // Metadata Item 2: File Params (BlockSize uint32_t)
+    std::memcpy(metaEntries[2].itemId, titanhub::vhd::VHDX_META_FILE_PARAMS_GUID, 16);
+    metaEntries[2].offset = 4128;
+    metaEntries[2].length = 8;
+    *reinterpret_cast<uint32_t*>(&vhdxData[0x200000 + 4128]) = BLOCK_SIZE;
+
+    // 4. BAT Table at 0x100000
+    // Entry 0: Payload block present, FileOffsetMB = 3 (0x300000), State = 6 (VhdxBlockFullyPresent)
+    uint64_t* bat = reinterpret_cast<uint64_t*>(&vhdxData[0x100000]);
+    bat[0] = (3ULL << 20) | titanhub::vhd::VhdxBlockFullyPresent; // Block 0 is at 3MB
+    bat[1] = titanhub::vhd::VhdxBlockZero;                        // Block 1 is sparse zero
+
+    // 5. Write test payload in block 0 at 0x300000
+    const char* vhdxPattern = "VHDX_PAYLOAD_BLOCK0_VERIFIED";
+    std::memcpy(&vhdxData[0x300000], vhdxPattern, std::strlen(vhdxPattern));
+
+    std::ofstream out(vhdxPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(vhdxData.data()), vhdxData.size());
+    out.close();
+
+    // Verify
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(vhdxPath, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk VHDX succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::VhdxDynamic, "Format is VhdxDynamic");
+        TEST_ASSERT(vdisk->GetVirtualSize() == VIRTUAL_SIZE, "Virtual size is 16MB");
+        TEST_ASSERT(vdisk->GetSectorSize() == SECTOR_SIZE, "Sector size is 512");
+
+        // Read from block 0
+        char readBuf[64]{};
+        bool readOk = vdisk->ReadBytes(0, std::strlen(vhdxPattern), readBuf);
+        TEST_ASSERT(readOk, "Read VHDX block 0 succeeded");
+        TEST_ASSERT(std::string(readBuf) == vhdxPattern, "VHDX block 0 data matches expected pattern");
+
+        // Read from block 1 (sparse zero)
+        std::vector<uint8_t> sparseBuf(512, 0xFF);
+        readOk = vdisk->ReadBytes(BLOCK_SIZE, sparseBuf.size(), sparseBuf.data());
+        TEST_ASSERT(readOk, "Read VHDX sparse block succeeded");
+        bool allZero = true;
+        for (uint8_t b : sparseBuf) {
+            if (b != 0) { allZero = false; break; }
+        }
+        TEST_ASSERT(allZero, "VHDX sparse block returned pure zeros");
+    }
+
+    vdisk.reset();
+    fs::remove(vhdxPath);
+}
+
 int main() {
     std::cout << "=================================================\n";
     std::cout << "       Titan Storage Hub Unit Test Battery       \n";
@@ -417,6 +671,9 @@ int main() {
     TestCompressionRLE();
     TestCompressionLZ4();
     TestTypesAndTelemetry();
+    TestVirtualDiskVhdFixed();
+    TestVirtualDiskVhdDynamic();
+    TestVirtualDiskVhdx();
 
     std::cout << "\n-------------------------------------------------\n";
     if (g_failures == 0) {
