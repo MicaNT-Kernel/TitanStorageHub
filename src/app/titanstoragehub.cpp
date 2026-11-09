@@ -539,7 +539,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 ofn.hwndOwner = hwnd;
                 ofn.lpstrFile = szFile;
                 ofn.nMaxFile = sizeof(szFile) / sizeof(szFile[0]);
-                ofn.lpstrFilter = L"Virtual Disks (*.vhd;*.vhdx)\0*.vhd;*.vhdx\0Disk Images (*.img;*.raw)\0*.img;*.raw\0All Files (*.*)\0*.*\0";
+                ofn.lpstrFilter = L"All Supported Virtual Disks (*.vhd;*.vhdx;*.vdi;*.vmdk;*.qcow2;*.img;*.raw)\0*.vhd;*.vhdx;*.vdi;*.vmdk;*.qcow2;*.img;*.raw\0Hyper-V Disks (*.vhd;*.vhdx)\0*.vhd;*.vhdx\0VirtualBox Disks (*.vdi)\0*.vdi\0VMware Disks (*.vmdk)\0*.vmdk\0QEMU Disks (*.qcow2)\0*.qcow2\0Raw Disk Images (*.img;*.raw)\0*.img;*.raw\0All Files (*.*)\0*.*\0";
                 ofn.nFilterIndex = 1;
                 ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 

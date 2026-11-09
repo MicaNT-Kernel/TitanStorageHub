@@ -3,6 +3,7 @@
 #include "titanhub/types.hpp"
 #include "titanhub/detector.hpp"
 #include "titanhub/vhd_types.hpp"
+#include "titanhub/vm_disk_types.hpp"
 
 #include <string>
 #include <vector>
@@ -21,7 +22,12 @@ enum class VirtualDiskFormat : uint32_t {
     VhdDynamic  = 2,
     VhdxDynamic = 3,
     VhdxFixed   = 4,
-    RawImage    = 5
+    VdiDynamic  = 5,
+    VdiFixed    = 6,
+    VmdkSparse  = 7,
+    VmdkFlat    = 8,
+    Qcow2       = 9,
+    RawImage    = 10
 };
 
 inline const char* VirtualDiskFormatToString(VirtualDiskFormat fmt) noexcept {
@@ -30,6 +36,11 @@ inline const char* VirtualDiskFormatToString(VirtualDiskFormat fmt) noexcept {
         case VirtualDiskFormat::VhdDynamic:  return "VHD (Dynamic Sparse)";
         case VirtualDiskFormat::VhdxDynamic: return "VHDX (Dynamic Sparse)";
         case VirtualDiskFormat::VhdxFixed:   return "VHDX (Fixed)";
+        case VirtualDiskFormat::VdiDynamic:  return "VirtualBox VDI (Dynamic Sparse)";
+        case VirtualDiskFormat::VdiFixed:    return "VirtualBox VDI (Fixed)";
+        case VirtualDiskFormat::VmdkSparse:  return "VMware VMDK (Sparse)";
+        case VirtualDiskFormat::VmdkFlat:    return "VMware VMDK (Flat)";
+        case VirtualDiskFormat::Qcow2:       return "QEMU QCOW2 (Dynamic CoW)";
         case VirtualDiskFormat::RawImage:    return "Raw Disk Image";
         default:                             return "Unknown Virtual Disk";
     }
@@ -544,6 +555,372 @@ private:
 };
 
 // ============================================================================
+// VDI Implementation (Oracle VirtualBox VDI)
+// ============================================================================
+class VdiDisk final : public IVirtualDisk {
+public:
+    static std::unique_ptr<VdiDisk> Open(const std::filesystem::path& path, std::string* outError = nullptr) {
+        auto disk = std::unique_ptr<VdiDisk>(new VdiDisk(path));
+        if (!disk->Initialize(outError)) return nullptr;
+        return disk;
+    }
+
+    VirtualDiskFormat GetFormat() const noexcept override { return m_Format; }
+    uint64_t GetVirtualSize() const noexcept override { return m_VirtualSize; }
+    uint32_t GetSectorSize() const noexcept override { return m_SectorSize; }
+    const std::filesystem::path& GetPath() const noexcept override { return m_Path; }
+
+    void Close() noexcept override {
+        if (m_File.is_open()) m_File.close();
+    }
+
+    bool ReadBytes(uint64_t byteOffset, size_t length, void* outBuffer) override {
+        if (!m_File.is_open() || outBuffer == nullptr) return false;
+        if (byteOffset >= m_VirtualSize) return false;
+
+        uint8_t* dst = static_cast<uint8_t*>(outBuffer);
+        size_t remaining = length;
+        uint64_t currentOffset = byteOffset;
+
+        if (currentOffset + remaining > m_VirtualSize) {
+            remaining = static_cast<size_t>(m_VirtualSize - currentOffset);
+            std::memset(dst + remaining, 0, length - remaining);
+        }
+
+        while (remaining > 0) {
+            const uint32_t blockIdx = static_cast<uint32_t>(currentOffset / m_BlockSize);
+            const uint32_t inBlockOffset = static_cast<uint32_t>(currentOffset % m_BlockSize);
+            const size_t chunk = std::min<size_t>(remaining, m_BlockSize - inBlockOffset);
+
+            if (blockIdx >= m_Bat.size() || m_Bat[blockIdx] == 0xFFFFFFFF || m_Bat[blockIdx] == 0xFFFFFFFE) {
+                std::memset(dst, 0, chunk);
+            } else {
+                const uint64_t blockFileOffset = static_cast<uint64_t>(m_OffsetData) + 
+                    (static_cast<uint64_t>(m_Bat[blockIdx]) * (m_BlockSize + m_BlockExtra)) + inBlockOffset;
+                m_File.seekg(static_cast<std::streamoff>(blockFileOffset), std::ios::beg);
+                m_File.read(reinterpret_cast<char*>(dst), chunk);
+                if (!m_File.good() && m_File.gcount() != static_cast<std::streamsize>(chunk)) {
+                    std::memset(dst, 0, chunk);
+                }
+            }
+
+            dst += chunk;
+            currentOffset += chunk;
+            remaining -= chunk;
+        }
+
+        return true;
+    }
+
+private:
+    explicit VdiDisk(std::filesystem::path path) : m_Path(std::move(path)) {}
+
+    bool Initialize(std::string* outError) {
+        m_File.open(m_Path, std::ios::binary);
+        if (!m_File.is_open()) {
+            if (outError) *outError = "Failed to open VDI file: " + m_Path.string();
+            return false;
+        }
+
+        VdiHeader hdr{};
+        m_File.seekg(0, std::ios::beg);
+        m_File.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+        if (hdr.signature != VDI_IMAGE_SIGNATURE) {
+            if (outError) *outError = "Invalid VDI image signature (0xBEDA107F expected)";
+            return false;
+        }
+
+        m_VirtualSize = hdr.diskSize;
+        m_BlockSize = hdr.blockSize > 0 ? hdr.blockSize : 1048576;
+        m_BlockExtra = hdr.blockExtraData;
+        m_OffsetData = hdr.offsetData;
+        m_SectorSize = hdr.sectorSize > 0 ? hdr.sectorSize : 512;
+
+        if (hdr.imageType == static_cast<uint32_t>(VdiImageType::NormalFixed)) {
+            m_Format = VirtualDiskFormat::VdiFixed;
+        } else {
+            m_Format = VirtualDiskFormat::VdiDynamic;
+        }
+
+        const uint32_t totalBlocks = hdr.totalBlocks;
+        if (totalBlocks > 0 && hdr.offsetBlocks > 0) {
+            m_Bat.resize(totalBlocks);
+            m_File.seekg(static_cast<std::streamoff>(hdr.offsetBlocks), std::ios::beg);
+            m_File.read(reinterpret_cast<char*>(m_Bat.data()), totalBlocks * sizeof(uint32_t));
+        }
+
+        return true;
+    }
+
+    std::filesystem::path m_Path;
+    std::ifstream         m_File;
+    VirtualDiskFormat     m_Format{VirtualDiskFormat::VdiDynamic};
+    uint64_t              m_VirtualSize{0};
+    uint32_t              m_BlockSize{1048576};
+    uint32_t              m_BlockExtra{0};
+    uint32_t              m_OffsetData{0};
+    uint32_t              m_SectorSize{512};
+    std::vector<uint32_t> m_Bat;
+};
+
+// ============================================================================
+// VMDK Implementation (VMware VMDK Sparse)
+// ============================================================================
+class VmdkDisk final : public IVirtualDisk {
+public:
+    static std::unique_ptr<VmdkDisk> Open(const std::filesystem::path& path, std::string* outError = nullptr) {
+        auto disk = std::unique_ptr<VmdkDisk>(new VmdkDisk(path));
+        if (!disk->Initialize(outError)) return nullptr;
+        return disk;
+    }
+
+    VirtualDiskFormat GetFormat() const noexcept override { return m_Format; }
+    uint64_t GetVirtualSize() const noexcept override { return m_VirtualSize; }
+    uint32_t GetSectorSize() const noexcept override { return 512; }
+    const std::filesystem::path& GetPath() const noexcept override { return m_Path; }
+
+    void Close() noexcept override {
+        if (m_File.is_open()) m_File.close();
+    }
+
+    bool ReadBytes(uint64_t byteOffset, size_t length, void* outBuffer) override {
+        if (!m_File.is_open() || outBuffer == nullptr) return false;
+        if (byteOffset >= m_VirtualSize) return false;
+
+        uint8_t* dst = static_cast<uint8_t*>(outBuffer);
+        size_t remaining = length;
+        uint64_t currentOffset = byteOffset;
+
+        if (currentOffset + remaining > m_VirtualSize) {
+            remaining = static_cast<size_t>(m_VirtualSize - currentOffset);
+            std::memset(dst + remaining, 0, length - remaining);
+        }
+
+        const uint64_t grainBytes = m_GrainSizeSectors * 512ULL;
+        while (remaining > 0) {
+            const uint64_t grainIdx = currentOffset / grainBytes;
+            const uint32_t inGrainOffset = static_cast<uint32_t>(currentOffset % grainBytes);
+            const size_t chunk = std::min<size_t>(remaining, grainBytes - inGrainOffset);
+
+            const uint64_t gdIdx = grainIdx / m_NumGTEsPerGT;
+            const uint64_t gtIdx = grainIdx % m_NumGTEsPerGT;
+
+            uint32_t grainSector = 0;
+            if (gdIdx < m_Gd.size() && m_Gd[gdIdx] != 0) {
+                const uint64_t gtOffset = static_cast<uint64_t>(m_Gd[gdIdx]) * 512ULL;
+                if (m_CachedGtOffset != gtOffset) {
+                    m_CachedGt.resize(m_NumGTEsPerGT);
+                    m_File.seekg(static_cast<std::streamoff>(gtOffset), std::ios::beg);
+                    m_File.read(reinterpret_cast<char*>(m_CachedGt.data()), m_NumGTEsPerGT * sizeof(uint32_t));
+                    m_CachedGtOffset = gtOffset;
+                }
+                if (gtIdx < m_CachedGt.size()) {
+                    grainSector = m_CachedGt[gtIdx];
+                }
+            }
+
+            if (grainSector == 0) {
+                std::memset(dst, 0, chunk);
+            } else {
+                const uint64_t grainFileOffset = (static_cast<uint64_t>(grainSector) * 512ULL) + inGrainOffset;
+                m_File.seekg(static_cast<std::streamoff>(grainFileOffset), std::ios::beg);
+                m_File.read(reinterpret_cast<char*>(dst), chunk);
+                if (!m_File.good() && m_File.gcount() != static_cast<std::streamsize>(chunk)) {
+                    std::memset(dst, 0, chunk);
+                }
+            }
+
+            dst += chunk;
+            currentOffset += chunk;
+            remaining -= chunk;
+        }
+
+        return true;
+    }
+
+private:
+    explicit VmdkDisk(std::filesystem::path path) : m_Path(std::move(path)) {}
+
+    bool Initialize(std::string* outError) {
+        m_File.open(m_Path, std::ios::binary);
+        if (!m_File.is_open()) {
+            if (outError) *outError = "Failed to open VMDK file: " + m_Path.string();
+            return false;
+        }
+
+        VmdkSparseHeader hdr{};
+        m_File.seekg(0, std::ios::beg);
+        m_File.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+
+        if (hdr.magicNumber != VMDK_SPARSE_MAGIC) {
+            if (outError) *outError = "Invalid VMDK sparse magic (0x564d444b expected)";
+            return false;
+        }
+
+        m_VirtualSize = hdr.capacity * 512ULL;
+        m_GrainSizeSectors = hdr.grainSize > 0 ? hdr.grainSize : 128;
+        m_NumGTEsPerGT = hdr.numGTEsPerGT > 0 ? hdr.numGTEsPerGT : 512;
+        m_Format = VirtualDiskFormat::VmdkSparse;
+
+        const uint64_t totalGrains = (hdr.capacity + m_GrainSizeSectors - 1) / m_GrainSizeSectors;
+        const uint64_t totalGTs = (totalGrains + m_NumGTEsPerGT - 1) / m_NumGTEsPerGT;
+
+        if (hdr.gdOffset > 0 && totalGTs > 0) {
+            m_Gd.resize(static_cast<size_t>(totalGTs));
+            m_File.seekg(static_cast<std::streamoff>(hdr.gdOffset * 512ULL), std::ios::beg);
+            m_File.read(reinterpret_cast<char*>(m_Gd.data()), totalGTs * sizeof(uint32_t));
+        }
+
+        return true;
+    }
+
+    std::filesystem::path m_Path;
+    std::ifstream         m_File;
+    VirtualDiskFormat     m_Format{VirtualDiskFormat::VmdkSparse};
+    uint64_t              m_VirtualSize{0};
+    uint64_t              m_GrainSizeSectors{128};
+    uint32_t              m_NumGTEsPerGT{512};
+    std::vector<uint32_t> m_Gd;
+    std::vector<uint32_t> m_CachedGt;
+    uint64_t              m_CachedGtOffset{0xFFFFFFFFFFFFFFFFULL};
+};
+
+// ============================================================================
+// QCOW2 Implementation (QEMU Copy-On-Write v2/v3)
+// ============================================================================
+class Qcow2Disk final : public IVirtualDisk {
+public:
+    static std::unique_ptr<Qcow2Disk> Open(const std::filesystem::path& path, std::string* outError = nullptr) {
+        auto disk = std::unique_ptr<Qcow2Disk>(new Qcow2Disk(path));
+        if (!disk->Initialize(outError)) return nullptr;
+        return disk;
+    }
+
+    VirtualDiskFormat GetFormat() const noexcept override { return m_Format; }
+    uint64_t GetVirtualSize() const noexcept override { return m_VirtualSize; }
+    uint32_t GetSectorSize() const noexcept override { return 512; }
+    const std::filesystem::path& GetPath() const noexcept override { return m_Path; }
+
+    void Close() noexcept override {
+        if (m_File.is_open()) m_File.close();
+    }
+
+    bool ReadBytes(uint64_t byteOffset, size_t length, void* outBuffer) override {
+        if (!m_File.is_open() || outBuffer == nullptr) return false;
+        if (byteOffset >= m_VirtualSize) return false;
+
+        uint8_t* dst = static_cast<uint8_t*>(outBuffer);
+        size_t remaining = length;
+        uint64_t currentOffset = byteOffset;
+
+        if (currentOffset + remaining > m_VirtualSize) {
+            remaining = static_cast<size_t>(m_VirtualSize - currentOffset);
+            std::memset(dst + remaining, 0, length - remaining);
+        }
+
+        const uint64_t clusterSize = 1ULL << m_ClusterBits;
+        const uint64_t l2Entries = 1ULL << (m_ClusterBits - 3);
+
+        while (remaining > 0) {
+            const uint64_t clusterIdx = currentOffset / clusterSize;
+            const uint32_t inClusterOffset = static_cast<uint32_t>(currentOffset % clusterSize);
+            const size_t chunk = std::min<size_t>(remaining, clusterSize - inClusterOffset);
+
+            const uint64_t l1Idx = clusterIdx / l2Entries;
+            const uint64_t l2Idx = clusterIdx % l2Entries;
+
+            uint64_t clusterOffset = 0;
+            if (l1Idx < m_L1Table.size() && m_L1Table[l1Idx] != 0) {
+                const uint64_t l2TableOffset = m_L1Table[l1Idx] & ~511ULL;
+                if (m_CachedL2Offset != l2TableOffset) {
+                    m_CachedL2.resize(static_cast<size_t>(l2Entries));
+                    m_File.seekg(static_cast<std::streamoff>(l2TableOffset), std::ios::beg);
+                    m_File.read(reinterpret_cast<char*>(m_CachedL2.data()), l2Entries * sizeof(uint64_t));
+                    for (auto& entry : m_CachedL2) {
+                        entry = SwapBe64(entry);
+                    }
+                    m_CachedL2Offset = l2TableOffset;
+                }
+                if (l2Idx < m_CachedL2.size()) {
+                    const uint64_t l2Entry = m_CachedL2[l2Idx];
+                    // Check standard cluster (not compressed, not zero cluster)
+                    if ((l2Entry & 1) == 0 && (l2Entry & (1ULL << 62)) == 0) {
+                        clusterOffset = l2Entry & 0x00FFFFFFFFFFFF00ULL;
+                    }
+                }
+            }
+
+            if (clusterOffset == 0) {
+                std::memset(dst, 0, chunk);
+            } else {
+                const uint64_t fileOffset = clusterOffset + inClusterOffset;
+                m_File.seekg(static_cast<std::streamoff>(fileOffset), std::ios::beg);
+                m_File.read(reinterpret_cast<char*>(dst), chunk);
+                if (!m_File.good() && m_File.gcount() != static_cast<std::streamsize>(chunk)) {
+                    std::memset(dst, 0, chunk);
+                }
+            }
+
+            dst += chunk;
+            currentOffset += chunk;
+            remaining -= chunk;
+        }
+
+        return true;
+    }
+
+private:
+    explicit Qcow2Disk(std::filesystem::path path) : m_Path(std::move(path)) {}
+
+    bool Initialize(std::string* outError) {
+        m_File.open(m_Path, std::ios::binary);
+        if (!m_File.is_open()) {
+            if (outError) *outError = "Failed to open QCOW2 file: " + m_Path.string();
+            return false;
+        }
+
+        Qcow2Header hdr{};
+        m_File.seekg(0, std::ios::beg);
+        m_File.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+
+        if (SwapBe32(hdr.magic) != QCOW2_MAGIC) {
+            if (outError) *outError = "Invalid QCOW2 magic signature (0x514649fb expected)";
+            return false;
+        }
+
+        m_ClusterBits = SwapBe32(hdr.clusterBits);
+        if (m_ClusterBits < 9 || m_ClusterBits > 21) {
+            m_ClusterBits = 16; // Default 64KB
+        }
+
+        m_VirtualSize = SwapBe64(hdr.size);
+        const uint32_t l1Size = SwapBe32(hdr.l1Size);
+        const uint64_t l1Offset = SwapBe64(hdr.l1TableOffset);
+
+        if (l1Size > 0 && l1Offset > 0) {
+            m_L1Table.resize(l1Size);
+            m_File.seekg(static_cast<std::streamoff>(l1Offset), std::ios::beg);
+            m_File.read(reinterpret_cast<char*>(m_L1Table.data()), l1Size * sizeof(uint64_t));
+            for (auto& entry : m_L1Table) {
+                entry = SwapBe64(entry);
+            }
+        }
+
+        m_Format = VirtualDiskFormat::Qcow2;
+        return true;
+    }
+
+    std::filesystem::path m_Path;
+    std::ifstream         m_File;
+    VirtualDiskFormat     m_Format{VirtualDiskFormat::Qcow2};
+    uint64_t              m_VirtualSize{0};
+    uint32_t              m_ClusterBits{16};
+    std::vector<uint64_t> m_L1Table;
+    std::vector<uint64_t> m_CachedL2;
+    uint64_t              m_CachedL2Offset{0xFFFFFFFFFFFFFFFFULL};
+};
+
+// ============================================================================
 // Factory: OpenVirtualDisk
 // ============================================================================
 inline std::unique_ptr<IVirtualDisk> OpenVirtualDisk(const std::filesystem::path& path, std::string* outError = nullptr) {
@@ -558,15 +935,40 @@ inline std::unique_ptr<IVirtualDisk> OpenVirtualDisk(const std::filesystem::path
         return nullptr;
     }
 
-    // Check VHDX file signature ("vhdxfile" at 0)
+    // 1. Check QCOW2 (Big-Endian "QFI\xfb" = 0x514649fb)
+    uint32_t magic32 = 0;
+    f.seekg(0, std::ios::beg);
+    f.read(reinterpret_cast<char*>(&magic32), 4);
+    if (SwapBe32(magic32) == QCOW2_MAGIC) {
+        f.close();
+        return Qcow2Disk::Open(path, outError);
+    }
+
+    // 2. Check VMDK Sparse ("KDMV" = 0x564d444b)
+    if (magic32 == VMDK_SPARSE_MAGIC) {
+        f.close();
+        return VmdkDisk::Open(path, outError);
+    }
+
+    // 3. Check VDI (0xBEDA107F at offset 0x40 / 64)
+    uint32_t vdiSig = 0;
+    f.seekg(0x40, std::ios::beg);
+    f.read(reinterpret_cast<char*>(&vdiSig), 4);
+    if (vdiSig == VDI_IMAGE_SIGNATURE) {
+        f.close();
+        return VdiDisk::Open(path, outError);
+    }
+
+    // 4. Check VHDX file signature ("vhdxfile" at 0)
     char sig[8]{};
+    f.seekg(0, std::ios::beg);
     f.read(sig, 8);
     if (std::memcmp(sig, VHDX_FILE_IDENTIFIER, 8) == 0) {
         f.close();
         return VhdxDisk::Open(path, outError);
     }
 
-    // Check VHD (footer at end of file or offset 0)
+    // 5. Check VHD (footer at end of file or offset 0)
     f.seekg(0, std::ios::end);
     const uint64_t sz = static_cast<uint64_t>(f.tellg());
     if (sz >= 512) {

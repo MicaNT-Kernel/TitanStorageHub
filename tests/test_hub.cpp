@@ -660,6 +660,228 @@ void TestVirtualDiskVhdx() {
     fs::remove(vhdxPath);
 }
 
+void TestVirtualDiskVdi() {
+    std::cout << "[TEST] Running TestVirtualDiskVdi...\n";
+    fs::path tempDir = fs::temp_directory_path();
+    fs::path vdiPath = tempDir / "test_disk.vdi";
+
+    constexpr uint64_t VIRTUAL_SIZE = 16 * 1024 * 1024; // 16MB
+    constexpr uint32_t BLOCK_SIZE   = 1024 * 1024;      // 1MB
+    constexpr uint32_t TOTAL_BLOCKS = static_cast<uint32_t>(VIRTUAL_SIZE / BLOCK_SIZE); // 16 blocks
+    constexpr uint32_t OFFSET_BLOCKS = 512;
+    constexpr uint32_t OFFSET_DATA   = 1048576; // 1MB
+
+    // Total file size: 1MB header/table space + 1MB for 1 allocated block = 2MB
+    std::vector<uint8_t> vdiData(OFFSET_DATA + BLOCK_SIZE, 0);
+
+    // 1. VdiHeader
+    auto* hdr = reinterpret_cast<titanhub::vhd::VdiHeader*>(vdiData.data());
+    std::memcpy(hdr->text, titanhub::vhd::VDI_TEXT_SIGNATURE, std::strlen(titanhub::vhd::VDI_TEXT_SIGNATURE));
+    hdr->signature = titanhub::vhd::VDI_IMAGE_SIGNATURE;
+    hdr->version = titanhub::vhd::VDI_VERSION_1_1;
+    hdr->headerSize = sizeof(titanhub::vhd::VdiHeader);
+    hdr->imageType = static_cast<uint32_t>(titanhub::vhd::VdiImageType::NormalDynamic);
+    hdr->offsetBlocks = OFFSET_BLOCKS;
+    hdr->offsetData = OFFSET_DATA;
+    hdr->sectorSize = 512;
+    hdr->diskSize = VIRTUAL_SIZE;
+    hdr->blockSize = BLOCK_SIZE;
+    hdr->totalBlocks = TOTAL_BLOCKS;
+    hdr->allocatedBlocks = 1;
+
+    // 2. BAT Table at OFFSET_BLOCKS (512)
+    uint32_t* bat = reinterpret_cast<uint32_t*>(&vdiData[OFFSET_BLOCKS]);
+    bat[0] = 0; // Block 0 is at offsetData + 0 * blockSize
+    for (uint32_t i = 1; i < TOTAL_BLOCKS; ++i) {
+        bat[i] = 0xFFFFFFFF; // Unallocated / sparse
+    }
+
+    // 3. Write payload in block 0
+    const char* vdiPattern = "VDI_PAYLOAD_BLOCK0_VERIFIED";
+    std::memcpy(&vdiData[OFFSET_DATA], vdiPattern, std::strlen(vdiPattern));
+
+    std::ofstream out(vdiPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(vdiData.data()), vdiData.size());
+    out.close();
+
+    // Verify
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(vdiPath, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk VDI succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::VdiDynamic, "Format is VdiDynamic");
+        TEST_ASSERT(vdisk->GetVirtualSize() == VIRTUAL_SIZE, "Virtual size is 16MB");
+        TEST_ASSERT(vdisk->GetSectorSize() == 512, "Sector size is 512");
+
+        // Read from block 0
+        char readBuf[64]{};
+        bool readOk = vdisk->ReadBytes(0, std::strlen(vdiPattern), readBuf);
+        TEST_ASSERT(readOk, "Read VDI block 0 succeeded");
+        TEST_ASSERT(std::string(readBuf) == vdiPattern, "VDI block 0 matches pattern");
+
+        // Read from block 1 (sparse zero)
+        std::vector<uint8_t> sparseBuf(512, 0xEE);
+        readOk = vdisk->ReadBytes(BLOCK_SIZE, sparseBuf.size(), sparseBuf.data());
+        TEST_ASSERT(readOk, "Read VDI sparse block succeeded");
+        bool allZero = true;
+        for (uint8_t b : sparseBuf) {
+            if (b != 0) { allZero = false; break; }
+        }
+        TEST_ASSERT(allZero, "VDI sparse block returned pure zeros");
+    }
+
+    vdisk.reset();
+    fs::remove(vdiPath);
+}
+
+void TestVirtualDiskVmdk() {
+    std::cout << "[TEST] Running TestVirtualDiskVmdk...\n";
+    fs::path tempDir = fs::temp_directory_path();
+    fs::path vmdkPath = tempDir / "test_disk.vmdk";
+
+    constexpr uint64_t CAPACITY_SECTORS = 32768; // 32768 * 512 = 16MB
+    constexpr uint64_t GRAIN_SIZE_SECTORS = 128; // 128 * 512 = 64KB
+    constexpr uint32_t NUM_GTES = 512;
+    constexpr uint64_t GD_SECTOR = 4;            // byte offset 2048
+    constexpr uint64_t GT_SECTOR = 5;            // byte offset 2560
+    constexpr uint64_t DATA_SECTOR = 128;        // byte offset 65536
+
+    // Total file size: 65536 + 65536 = 131072 bytes (128KB)
+    std::vector<uint8_t> vmdkData(DATA_SECTOR * 512 + GRAIN_SIZE_SECTORS * 512, 0);
+
+    // 1. VmdkSparseHeader at sector 0
+    auto* hdr = reinterpret_cast<titanhub::vhd::VmdkSparseHeader*>(vmdkData.data());
+    hdr->magicNumber = titanhub::vhd::VMDK_SPARSE_MAGIC;
+    hdr->version = 1;
+    hdr->flags = 3;
+    hdr->capacity = CAPACITY_SECTORS;
+    hdr->grainSize = GRAIN_SIZE_SECTORS;
+    hdr->descriptorOffset = 1;
+    hdr->descriptorSize = 1;
+    hdr->numGTEsPerGT = NUM_GTES;
+    hdr->rgdOffset = 0;
+    hdr->gdOffset = GD_SECTOR;
+    hdr->overHead = 128;
+
+    // 2. Grain Directory at sector 4 (byte offset 2048)
+    uint32_t* gd = reinterpret_cast<uint32_t*>(&vmdkData[GD_SECTOR * 512]);
+    gd[0] = static_cast<uint32_t>(GT_SECTOR);
+
+    // 3. Grain Table at sector 5 (byte offset 2560)
+    uint32_t* gt = reinterpret_cast<uint32_t*>(&vmdkData[GT_SECTOR * 512]);
+    gt[0] = static_cast<uint32_t>(DATA_SECTOR); // Grain 0 points to sector 128
+    // gt[1..511] are 0 (unallocated)
+
+    // 4. Grain 0 data at sector 128 (byte offset 65536)
+    const char* vmdkPattern = "VMDK_PAYLOAD_GRAIN0_VERIFIED";
+    std::memcpy(&vmdkData[DATA_SECTOR * 512], vmdkPattern, std::strlen(vmdkPattern));
+
+    std::ofstream out(vmdkPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(vmdkData.data()), vmdkData.size());
+    out.close();
+
+    // Verify
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(vmdkPath, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk VMDK succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::VmdkSparse, "Format is VmdkSparse");
+        TEST_ASSERT(vdisk->GetVirtualSize() == CAPACITY_SECTORS * 512ULL, "Virtual size is 16MB");
+        TEST_ASSERT(vdisk->GetSectorSize() == 512, "Sector size is 512");
+
+        // Read from grain 0
+        char readBuf[64]{};
+        bool readOk = vdisk->ReadBytes(0, std::strlen(vmdkPattern), readBuf);
+        TEST_ASSERT(readOk, "Read VMDK grain 0 succeeded");
+        TEST_ASSERT(std::string(readBuf) == vmdkPattern, "VMDK grain 0 matches pattern");
+
+        // Read from grain 1 (sparse zero)
+        std::vector<uint8_t> sparseBuf(512, 0xCC);
+        readOk = vdisk->ReadBytes(GRAIN_SIZE_SECTORS * 512, sparseBuf.size(), sparseBuf.data());
+        TEST_ASSERT(readOk, "Read VMDK sparse grain succeeded");
+        bool allZero = true;
+        for (uint8_t b : sparseBuf) {
+            if (b != 0) { allZero = false; break; }
+        }
+        TEST_ASSERT(allZero, "VMDK sparse grain returned pure zeros");
+    }
+
+    vdisk.reset();
+    fs::remove(vmdkPath);
+}
+
+void TestVirtualDiskQcow2() {
+    std::cout << "[TEST] Running TestVirtualDiskQcow2...\n";
+    fs::path tempDir = fs::temp_directory_path();
+    fs::path qcow2Path = tempDir / "test_disk.qcow2";
+
+    constexpr uint64_t VIRTUAL_SIZE = 16 * 1024 * 1024; // 16MB
+    constexpr uint32_t CLUSTER_BITS = 16;               // 64KB clusters
+    constexpr uint64_t CLUSTER_SIZE = 1ULL << CLUSTER_BITS; // 65536
+    constexpr uint64_t L1_OFFSET    = 65536;             // byte 65536 (cluster 1)
+    constexpr uint64_t L2_OFFSET    = 131072;            // byte 131072 (cluster 2)
+    constexpr uint64_t DATA_OFFSET  = 196608;            // byte 196608 (cluster 3)
+
+    // Total file size: 196608 + 65536 = 262144 bytes (256KB)
+    std::vector<uint8_t> qcow2Data(DATA_OFFSET + CLUSTER_SIZE, 0);
+
+    // 1. Qcow2Header (Big Endian)
+    auto* hdr = reinterpret_cast<titanhub::vhd::Qcow2Header*>(qcow2Data.data());
+    hdr->magic = titanhub::vhd::SwapBe32(titanhub::vhd::QCOW2_MAGIC);
+    hdr->version = titanhub::vhd::SwapBe32(2);
+    hdr->clusterBits = titanhub::vhd::SwapBe32(CLUSTER_BITS);
+    hdr->size = titanhub::vhd::SwapBe64(VIRTUAL_SIZE);
+    hdr->cryptMethod = 0;
+    hdr->l1Size = titanhub::vhd::SwapBe32(1);
+    hdr->l1TableOffset = titanhub::vhd::SwapBe64(L1_OFFSET);
+
+    // 2. L1 Table at L1_OFFSET (65536)
+    uint64_t* l1 = reinterpret_cast<uint64_t*>(&qcow2Data[L1_OFFSET]);
+    l1[0] = titanhub::vhd::SwapBe64(L2_OFFSET); // Points to L2 table
+
+    // 3. L2 Table at L2_OFFSET (131072)
+    uint64_t* l2 = reinterpret_cast<uint64_t*>(&qcow2Data[L2_OFFSET]);
+    l2[0] = titanhub::vhd::SwapBe64(DATA_OFFSET); // Cluster 0 points to DATA_OFFSET
+    // l2[1..] are 0 (sparse unallocated cluster)
+
+    // 4. Cluster 0 data at DATA_OFFSET (196608)
+    const char* qcow2Pattern = "QCOW2_PAYLOAD_CLUSTER0_VERIFIED";
+    std::memcpy(&qcow2Data[DATA_OFFSET], qcow2Pattern, std::strlen(qcow2Pattern));
+
+    std::ofstream out(qcow2Path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(qcow2Data.data()), qcow2Data.size());
+    out.close();
+
+    // Verify
+    std::string err;
+    auto vdisk = titanhub::vhd::OpenVirtualDisk(qcow2Path, &err);
+    TEST_ASSERT(vdisk != nullptr, "OpenVirtualDisk QCOW2 succeeded");
+    if (vdisk) {
+        TEST_ASSERT(vdisk->GetFormat() == titanhub::vhd::VirtualDiskFormat::Qcow2, "Format is Qcow2");
+        TEST_ASSERT(vdisk->GetVirtualSize() == VIRTUAL_SIZE, "Virtual size is 16MB");
+        TEST_ASSERT(vdisk->GetSectorSize() == 512, "Sector size is 512");
+
+        // Read from cluster 0
+        char readBuf[64]{};
+        bool readOk = vdisk->ReadBytes(0, std::strlen(qcow2Pattern), readBuf);
+        TEST_ASSERT(readOk, "Read QCOW2 cluster 0 succeeded");
+        TEST_ASSERT(std::string(readBuf) == qcow2Pattern, "QCOW2 cluster 0 matches pattern");
+
+        // Read from cluster 1 (sparse zero)
+        std::vector<uint8_t> sparseBuf(512, 0xAA);
+        readOk = vdisk->ReadBytes(CLUSTER_SIZE, sparseBuf.size(), sparseBuf.data());
+        TEST_ASSERT(readOk, "Read QCOW2 sparse cluster succeeded");
+        bool allZero = true;
+        for (uint8_t b : sparseBuf) {
+            if (b != 0) { allZero = false; break; }
+        }
+        TEST_ASSERT(allZero, "QCOW2 sparse cluster returned pure zeros");
+    }
+
+    vdisk.reset();
+    fs::remove(qcow2Path);
+}
+
 int main() {
     std::cout << "=================================================\n";
     std::cout << "       Titan Storage Hub Unit Test Battery       \n";
@@ -674,6 +896,9 @@ int main() {
     TestVirtualDiskVhdFixed();
     TestVirtualDiskVhdDynamic();
     TestVirtualDiskVhdx();
+    TestVirtualDiskVdi();
+    TestVirtualDiskVmdk();
+    TestVirtualDiskQcow2();
 
     std::cout << "\n-------------------------------------------------\n";
     if (g_failures == 0) {
